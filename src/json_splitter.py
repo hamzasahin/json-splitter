@@ -4,6 +4,7 @@ import ijson
 import os
 import re # Needed for filename sanitization
 import logging # Added for logging
+import sys # Added to check command-line arguments
 
 # --- Logging Setup ---
 # Configure basic logging
@@ -221,31 +222,8 @@ def split_by_size(input_file, output_prefix, max_size_bytes, path, output_format
         log.exception(f"An unexpected error occurred during size splitting:")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Split large JSON files using streaming.")
-    parser.add_argument("input_file", help="Path to the input JSON file.")
-    parser.add_argument("output_prefix", help="Prefix for the output files (e.g., 'output/chunk').")
-    parser.add_argument("--split-by", required=True, choices=['count', 'size', 'key'], help="Criterion to split by ('count', 'size', or 'key').")
-    parser.add_argument("--value", required=True, type=str, help="Value for the splitting criterion (e.g., number of items for 'count', size like '100MB' for 'size', the key name for 'key').")
-    parser.add_argument("--path", required=True, help="JSON path to the array/objects to split (e.g., 'item' for root array, 'data.records.item'). For 'key' splitting, this should point to the objects containing the key.")
-    parser.add_argument("--output-format", choices=['json', 'jsonl'], default='json', help="Output format ('json' or 'jsonl'). Default: json. Note: 'key' splitting currently forces 'jsonl'.")
-    # Add secondary constraints
-    parser.add_argument("--max-records", type=int, default=None, help="Secondary constraint: Maximum records per output file.")
-    parser.add_argument("--max-size", type=str, default=None, help="Secondary constraint: Maximum approximate size per output file (e.g., '50MB').")
-    # Key splitting specific options
-    parser.add_argument("--on-missing-key", choices=['group', 'skip', 'error'], default='group', help="Action for items missing the specified key when splitting by key (default: group). 'group' puts them in '__missing_key__' file.")
-    parser.add_argument("--on-invalid-item", choices=['warn', 'skip', 'error'], default='warn', help="Action for items at target path that are not objects when splitting by key (default: warn). 'warn' prints a message and skips.")
-    # Logging control
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose debug logging.")
-    # Filename formatting
-    parser.add_argument("--filename-format", type=str,
-                        default="{prefix}_{type}_{index:04d}{part}.{ext}",
-                        help="Format string for output filenames. Available placeholders: "
-                             "{prefix}, {type} ('chunk' or 'key'), {index} (primary index/key value), "
-                             "{part} (_part_XXXX or empty), {ext} (json/jsonl). Example: chunk_{index}.{ext}")
-
-    args = parser.parse_args()
-
+def execute_split(args):
+    """Contains the core logic to perform splitting based on parsed arguments."""
     # --- Configure Logging Level ---
     if args.verbose:
         log.setLevel(logging.DEBUG)
@@ -275,9 +253,10 @@ def main():
     # Parse secondary constraints
     max_records = args.max_records
     max_size_bytes = None
-    if args.max_size:
+    max_size_str = args.max_size # Keep original string for parsing
+    if max_size_str:
         try:
-            max_size_bytes = _parse_size(args.max_size)
+            max_size_bytes = _parse_size(max_size_str)
             if max_size_bytes <= 0:
                  raise ValueError("Max size must be positive.")
         except ValueError as e:
@@ -308,6 +287,7 @@ def main():
             log.warning("Key-based splitting currently enforces JSON Lines ('jsonl') format for efficiency and reduced memory usage. Overriding --output-format to 'jsonl'.")
             args.output_format = 'jsonl'
 
+    # --- Call the appropriate splitting function ---
     if args.split_by == 'count':
         try:
             count_val = int(args.value)
@@ -345,6 +325,266 @@ def main():
     else:
         # This case should not be reachable due to choices constraint
         log.error(f"Internal error: Splitting by '{args.split_by}' is not implemented.")
+
+# --- Helper Functions for Interactive Mode ---
+
+def _prompt_with_validation(prompt_text, required=True, validation_func=None, choices=None, default=None):
+    """Generic function to prompt user with validation and choices."""
+    while True:
+        prompt_suffix = f" [{default}]" if default is not None else ""
+        try:
+            user_input = input(f"{prompt_text}{prompt_suffix}: ").strip()
+            if not user_input:
+                if default is not None:
+                    return default # Return default if user just hits Enter
+                elif required:
+                    print("  Error: Input is required.")
+                    continue
+                else:
+                    return None # Allow empty input if not required and no default
+
+            if choices:
+                if user_input.lower() not in [c.lower() for c in choices]:
+                    print(f"  Error: Invalid choice. Please choose from: {', '.join(choices)}")
+                    continue
+                # Return the matching choice (maintaining original case if needed, though lower() is often fine)
+                user_input = next(c for c in choices if c.lower() == user_input.lower())
+
+            if validation_func:
+                is_valid, error_msg_or_value = validation_func(user_input)
+                if not is_valid:
+                    print(f"  Error: {error_msg_or_value}")
+                    continue
+                # Validation function might return the processed value (e.g., parsed size)
+                if error_msg_or_value is not None and error_msg_or_value != True:
+                    return error_msg_or_value
+
+            return user_input # Return the validated input
+        except EOFError: # Handle Ctrl+D
+            print("\nOperation cancelled.")
+            sys.exit(0)
+
+def _validate_input_file(filepath):
+    if not filepath:
+         return False, "Input file path cannot be empty."
+    if not os.path.isfile(filepath):
+        return False, f"File not found at '{filepath}'."
+    if not os.access(filepath, os.R_OK):
+        return False, f"File is not readable (check permissions): '{filepath}'."
+    return True, None
+
+def _validate_output_prefix(prefix):
+     if not prefix:
+          return False, "Output prefix cannot be empty."
+     # Basic check for obviously invalid chars often disallowed, though OS varies
+     # This isn't foolproof but catches common mistakes.
+     invalid_chars = ':*?"<>|'
+     if any(c in invalid_chars for c in prefix):
+         return False, f"Output prefix contains potentially invalid characters from the set: {invalid_chars}"
+     return True, None
+
+def _validate_path(path_str):
+     if not path_str:
+          return False, "JSON path cannot be empty."
+     # Basic check - doesn't validate ijson path syntax fully but ensures non-empty
+     return True, None
+
+def _validate_split_value(value_str, split_by):
+    if not value_str:
+        return False, "Split value cannot be empty."
+    if split_by == 'count':
+        try:
+            count = int(value_str)
+            if count <= 0:
+                return False, "Count must be a positive integer."
+            return True, count # Return the integer value
+        except ValueError:
+            return False, "Value must be a valid positive integer for split-by 'count'."
+    elif split_by == 'size':
+        try:
+            size_bytes = _parse_size(value_str)
+            if size_bytes <= 0:
+                return False, "Size must be positive."
+            return True, value_str # Return the original string for size
+        except ValueError as e:
+            return False, f"Invalid size format: {e}. Use numbers optionally followed by KB, MB, GB."
+    elif split_by == 'key':
+        # Key name just needs to be non-empty
+        return True, value_str
+    else:
+         # Should not happen if split_by is validated first
+         return False, "Invalid split_by type provided for value validation."
+
+def _validate_optional_int(value_str):
+    if not value_str: # Empty is OK, means None
+        return True, None
+    try:
+        num = int(value_str)
+        if num <= 0:
+             return False, "Value must be a positive integer if provided."
+        return True, num
+    except ValueError:
+         return False, "Value must be a valid positive integer."
+
+def _validate_optional_size(value_str):
+     if not value_str:
+        return True, None
+     try:
+        size_bytes = _parse_size(value_str)
+        if size_bytes <= 0:
+            return False, "Size must be positive if provided."
+        return True, value_str # Return the original string
+     except ValueError as e:
+        return False, f"Invalid size format: {e}. Use numbers optionally followed by KB, MB, GB."
+
+# --- End Helper Functions ---
+
+def run_interactive_mode():
+    """Prompts the user for arguments interactively in a user-friendly way."""
+    log.info("✨ Welcome to JSON Splitter Interactive Mode! ✨")
+    log.info("Let's configure the splitting process step-by-step.")
+    args = argparse.Namespace()
+
+    # Set defaults first (mirroring argparse defaults)
+    args.output_format = 'json'
+    args.max_records = None
+    args.max_size = None
+    args.on_missing_key = 'group'
+    args.on_invalid_item = 'warn'
+    args.verbose = False
+    args.filename_format = None
+
+    try:
+        print("\n--- 📝 Required Settings ---")
+        # --- Required Arguments ---
+        args.input_file = _prompt_with_validation(
+            "📄 Enter path to the input JSON file",
+            validation_func=_validate_input_file
+        )
+        args.output_prefix = _prompt_with_validation(
+            "📂 Enter the output file prefix (e.g., output/chunk or results/data)",
+            validation_func=_validate_output_prefix
+        )
+        args.split_by = _prompt_with_validation(
+            "✂️ Split by which criterion? (Enter 'count', 'size', or 'key')",
+            choices=['count', 'size', 'key']
+        )
+
+        # Provide specific examples based on the chosen split type
+        value_prompt = f"🔢 Enter value for '{args.split_by}' split"
+        if args.split_by == 'count':
+            value_prompt += " (e.g., 10000 for 10k items per file)"
+        elif args.split_by == 'size':
+            value_prompt += " (e.g., 15MB, 500KB, 1GB)"
+        elif args.split_by == 'key':
+            value_prompt += " (e.g., category_id or user_id)"
+        args.value = _prompt_with_validation(value_prompt, validation_func=lambda v: _validate_split_value(v, args.split_by))
+
+        args.path = _prompt_with_validation(
+            "🎯 Enter JSON path to the items to split (e.g., `item` for root array, `data.records.item` for nested)",
+            validation_func=_validate_path
+        )
+
+        # --- Optional Arguments --- #
+        print("\n--- 🤔 Optional Settings --- (Press Enter to use defaults)")
+        set_optionals = _prompt_with_validation("Configure optional settings? (y/N)", required=False, choices=['y', 'n'], default='n')
+
+        if set_optionals.lower() == 'y':
+            log.info("\n🔧 Configuring optional settings...")
+            args.output_format = _prompt_with_validation(
+                "📦 Output format?",
+                choices=['json', 'jsonl'],
+                default=args.output_format,
+                required=False
+            )
+            args.max_records = _prompt_with_validation(
+                "📏 Max records per file part (secondary limit, e.g., 50000)?",
+                default="None",
+                validation_func=_validate_optional_int,
+                required=False
+            )
+            args.max_size = _prompt_with_validation(
+                "💾 Max size per file part (secondary limit, e.g., 50MB)?",
+                default="None",
+                validation_func=_validate_optional_size,
+                required=False
+            )
+
+            if args.split_by == 'key':
+                 log.info("\n🔑 Key Split Specific Options:")
+                 args.on_missing_key = _prompt_with_validation(
+                     "❓ Action for items missing the key?",
+                     choices=['group', 'skip', 'error'],
+                     default=args.on_missing_key,
+                     required=False
+                 )
+                 args.on_invalid_item = _prompt_with_validation(
+                     "⚠️ Action for items at path that are not objects?",
+                     choices=['warn', 'skip', 'error'],
+                     default=args.on_invalid_item,
+                     required=False
+                 )
+
+            # Set appropriate default filename format based on split type before prompting
+            default_ff = "{prefix}_key_{index}{part}.{ext}" if args.split_by == 'key' else "{prefix}_{type}_{index:04d}{part}.{ext}"
+            ff_prompt = f"🏷️ Output filename format string? (Placeholders: {{prefix}}, {{type}}, {{index}}, {{part}}, {{ext}} )"
+            args.filename_format = _prompt_with_validation(ff_prompt, default=default_ff, required=False)
+
+            verbose_resp = _prompt_with_validation("🐞 Enable verbose logging? (y/N)", choices=['y', 'n'], default='n', required=False)
+            args.verbose = (verbose_resp.lower() == 'y')
+
+        # Ensure filename_format has a value (use default if not set in optionals)
+        if args.filename_format is None:
+             args.filename_format = "{prefix}_key_{index}{part}.{ext}" if args.split_by == 'key' else "{prefix}_{type}_{index:04d}{part}.{ext}"
+
+        log.info("\n✅ Configuration complete. Proceeding with splitting...")
+        return args
+
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user during setup.")
+        sys.exit(0)
+    except EOFError:
+        print("\nOperation cancelled.")
+        sys.exit(0)
+
+
+def main():
+    # Check if any command-line arguments were passed (sys.argv[0] is the script name)
+    if len(sys.argv) > 1:
+        # --- Standard CLI Argument Parsing ---
+        parser = argparse.ArgumentParser(description="Split large JSON files using streaming.")
+        parser.add_argument("input_file", help="Path to the input JSON file.")
+        parser.add_argument("output_prefix", help="Prefix for the output files (e.g., 'output/chunk').")
+        parser.add_argument("--split-by", required=True, choices=['count', 'size', 'key'], help="Criterion to split by ('count', 'size', or 'key').")
+        parser.add_argument("--value", required=True, type=str, help="Value for the splitting criterion (e.g., number of items for 'count', size like '100MB' for 'size', the key name for 'key').")
+        parser.add_argument("--path", required=True, help="JSON path to the array/objects to split (e.g., 'item' for root array, 'data.records.item'). For 'key' splitting, this should point to the objects containing the key.")
+        parser.add_argument("--output-format", choices=['json', 'jsonl'], default='json', help="Output format ('json' or 'jsonl'). Default: json. Note: 'key' splitting currently forces 'jsonl'.")
+        parser.add_argument("--max-records", type=int, default=None, help="Secondary constraint: Maximum records per output file.")
+        parser.add_argument("--max-size", type=str, default=None, help="Secondary constraint: Maximum approximate size per output file (e.g., '50MB').")
+        parser.add_argument("--on-missing-key", choices=['group', 'skip', 'error'], default='group', help="Action for items missing the specified key when splitting by key (default: group). 'group' puts them in '__missing_key__' file.")
+        parser.add_argument("--on-invalid-item", choices=['warn', 'skip', 'error'], default='warn', help="Action for items at target path that are not objects when splitting by key (default: warn). 'warn' prints a message and skips.")
+        parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose debug logging.")
+        parser.add_argument("--filename-format", type=str,
+                            default="{prefix}_{type}_{index:04d}{part}.{ext}",
+                            help="Format string for output filenames. Available placeholders: "
+                                 "{prefix}, {type} ('chunk' or 'key'), {index} (primary index/key value), "
+                                 "{part} (_part_XXXX or empty), {ext} (json/jsonl). Example: chunk_{index}.{ext}")
+
+        args = parser.parse_args()
+        execute_split(args)
+    else:
+        # --- Interactive Mode --- #
+        try:
+            args = run_interactive_mode()
+            if args:
+                execute_split(args)
+            else:
+                log.info("Interactive setup cancelled or not yet implemented.")
+        except KeyboardInterrupt:
+            print("\nOperation cancelled by user.")
+            sys.exit(0)
+
+
 
 # Helper function to parse size strings (e.g., "100MB")
 def _parse_size(size_str):
