@@ -15,90 +15,156 @@ log = logging.getLogger(__name__)
 
 def split_by_count(input_file, output_prefix, count, path, output_format, max_records=None, max_size_bytes=None, filename_format="{prefix}_{type}_{index:04d}{part}.{ext}"):
     """Splits a JSON array based on element count, with optional secondary size/record limits."""
-    # Determine the effective primary record limit per chunk/file part
-    effective_primary_count = count
-    if max_records is not None and max_records < count:
-        log.warning(f"--max-records ({max_records}) is less than primary count ({count}). Effective primary split count per file part will be {max_records}.")
-        effective_primary_count = max_records
+    # Determine the effective splitting mode
+    split_by_max_records_only = False
+    effective_record_limit = count # Default to primary count
+
+    if max_records is not None:
+        log.info(f"--max-records ({max_records}) provided.")
+        if max_size_bytes is None:
+            # If ONLY max_records is given (or count), it becomes the sole splitting criterion
+            log.info(f"Splitting strictly by max_records={max_records} per file.")
+            split_by_max_records_only = True
+            effective_record_limit = max_records
+        else:
+            # Both max_records and max_size are present - complex case handled below
+            log.info(f"Primary count={count}, secondary max_records={max_records}, secondary max_size set.")
+            # Use the smaller of count and max_records for part splitting check if needed?
+            # This interaction is complex. Let's stick to the logic where count is primary
+            # and max_records/max_size are secondary part limits for now.
+            # The logic below handles this.
+            pass
 
     try:
-        log.info(f"Splitting '{input_file}' at path '{path}' primarily by count={count}...")
-        if max_records: log.info(f"  Secondary limit: Max {max_records} records per file.")
-        if max_size_bytes: log.info(f"  Secondary limit: Max ~{max_size_bytes / (1024*1024):.2f} MB per file.") # Show size in MB
+        # Simplified logging based on understanding above
+        if split_by_max_records_only:
+             log.info(f"Splitting '{input_file}' at path '{path}' strictly by record count={effective_record_limit}...")
+        else:
+            log.info(f"Splitting '{input_file}' at path '{path}' primarily by count={count}...")
+            if max_records: log.info(f"  Secondary limit: Max {max_records} records per file part.")
+            if max_size_bytes: log.info(f"  Secondary limit: Max ~{max_size_bytes / (1024*1024):.2f} MB per file part.")
 
         with open(input_file, 'rb') as f:
             items_iterator = ijson.items(f, path)
             chunk = []
-            primary_chunk_index = 0 # Index for the main count-based groups
-            part_file_index = 0   # Index for files split by secondary limits within a primary group
+            primary_chunk_index = 0 # Index for the main count-based groups or max_records groups
+            items_in_primary_chunk = 0 # Only used when NOT split_by_max_records_only
+            part_file_index = 0   # Only used when NOT split_by_max_records_only
             item_count_total = 0
             current_part_size_bytes = 0
-            # Estimate overhead based on format
-            base_overhead = 2 if output_format == 'json' else 0 # [] or nothing
-            per_item_overhead = 4 if output_format == 'json' else 1 # ,\\n indented or \\n
+            base_overhead = 2 if output_format == 'json' else 0
+            per_item_overhead = 4 if output_format == 'json' else 1
             last_progress_report_item = 0
-            PROGRESS_REPORT_INTERVAL = 10000 # Report progress every N items
+            PROGRESS_REPORT_INTERVAL = 10000
 
-            for item_count_total, item in enumerate(items_iterator, 1): # Start count from 1
+            for item_count_total, item in enumerate(items_iterator, 1):
                 # --- Progress Reporting ---
                 if item_count_total % PROGRESS_REPORT_INTERVAL == 0:
                     log.info(f"  Processed {item_count_total} items...")
                     last_progress_report_item = item_count_total
                 # ---
 
+                # --- Mode 1: Split strictly by max_records --- #
+                if split_by_max_records_only:
+                    chunk.append(item)
+                    if len(chunk) == effective_record_limit:
+                        _write_chunk(output_prefix, primary_chunk_index, chunk, output_format, part_index=None, filename_format=filename_format)
+                        primary_chunk_index += 1
+                        chunk = [] # Reset for next file
+                    continue # Skip rest of the loop for this mode
+
+                # --- Mode 2: Split by primary count with secondary limits --- #
+                # (Logic from previous successful edit for test_split_count_with_max_size)
+                # 1. Estimate size if needed
                 item_size = 0
-                # Estimate size if max_size_bytes is set
+                item_str = None
                 if max_size_bytes:
                     try:
-                        item_bytes = json.dumps(item).encode('utf-8')
+                        item_str = json.dumps(item)
+                        item_bytes = item_str.encode('utf-8')
                         item_size = len(item_bytes)
                     except TypeError as e:
-                        log.warning(f"Could not serialize item {item_count_total} to estimate size: {e}. Skipping size check for this item.")
+                        log.warning(f"Could not serialize item {item_count_total} to estimate size: {e}. Skipping size check.")
                         item_size = 0
+                        item_str = None
 
-                # Determine if the *current file part* needs to end before adding this item
-                split_needed = False
-                primary_split_occurred = False # Flag to track if the split is due to the primary count
-                if chunk:
-                    # 1. Primary count limit for the *part* reached
-                    if len(chunk) == effective_primary_count:
-                        log.debug(f"Primary count limit ({effective_primary_count}) reached for chunk {primary_chunk_index}, part {part_file_index}.")
-                        split_needed = True
-                        primary_split_occurred = True # Mark this split as primary
-                    # 2. Secondary max_size limit reached (only if primary count not reached)
-                    elif max_size_bytes and (current_part_size_bytes + item_size + per_item_overhead) > max_size_bytes:
-                        log.debug(f"Secondary size limit (~{max_size_bytes / (1024*1024):.2f}MB) reached for chunk {primary_chunk_index}, part {part_file_index}.")
-                        split_needed = True
-                        # primary_split_occurred remains False here
+                # 2. Add item to the current chunk/part first
+                chunk.append(item)
+                items_in_primary_chunk += 1
+                current_part_size_bytes += item_size + (per_item_overhead if len(chunk) > 1 else base_overhead)
+                if len(chunk) == 1:
+                     current_part_size_bytes = base_overhead + item_size # Correct size for first item
 
-                if split_needed:
-                    # Write the current part
-                    _write_chunk(output_prefix, primary_chunk_index, chunk, output_format, part_index=part_file_index, filename_format=filename_format)
+                # 3. Determine if a split is needed AFTER adding the item
+                part_split_needed = False
+                primary_split_needed = False
+                write_full_chunk = True # Assume we write the whole chunk unless size limit forces carry-over
+                item_to_carry_over = None
 
-                    # If the split was due to reaching the *primary* count limit,
-                    # it means we are starting a new primary group.
-                    if primary_split_occurred:
-                         log.debug(f"Starting new primary chunk {primary_chunk_index + 1}.")
-                         primary_chunk_index += 1
-                         part_file_index = 0 # Reset part index for the new primary group
+                # Check secondary limits first (for the current part file)
+                # Use max_records directly here if provided as secondary limit
+                if max_records and len(chunk) == max_records:
+                    log.debug(f"Part record limit ({max_records}) reached for chunk {primary_chunk_index}, part {part_file_index}.")
+                    part_split_needed = True
+                elif max_size_bytes and current_part_size_bytes > max_size_bytes and len(chunk) > 1:
+                    log.debug(f"Part size limit (~{max_size_bytes / (1024*1024):.2f}MB) reached for chunk {primary_chunk_index}, part {part_file_index}.")
+                    part_split_needed = True
+                    write_full_chunk = False
+                    item_to_carry_over = chunk.pop()
+                    items_in_primary_chunk -= 1
+                    try:
+                        carry_bytes = json.dumps(item_to_carry_over).encode('utf-8')
+                        current_part_size_bytes -= (len(carry_bytes) + per_item_overhead)
+                    except TypeError:
+                         log.warning("Could not re-encode carried over item for size adjustment.")
+
+                # Check primary limit
+                if items_in_primary_chunk == count:
+                    log.debug(f"Primary count limit ({count}) reached for chunk {primary_chunk_index}.")
+                    primary_split_needed = True
+                    part_split_needed = False # Primary split takes precedence
+
+                # 4. Perform write and reset if any split needed
+                if primary_split_needed or part_split_needed:
+                    data_to_write = chunk
+                    if data_to_write:
+                         _write_chunk(output_prefix, primary_chunk_index, data_to_write, output_format, part_index=part_file_index, filename_format=filename_format)
                     else:
-                         # Otherwise, it was a secondary split (size), just increment the part index
-                         log.debug(f"Starting new part {part_file_index + 1} for primary chunk {primary_chunk_index}.")
-                         part_file_index += 1
+                         log.warning(f"Chunk for primary index {primary_chunk_index} part {part_file_index} was empty after size adjustment. No file written for this part.")
 
-                    # Reset variables for the next part (whether primary or secondary)
                     chunk = []
                     current_part_size_bytes = base_overhead
 
+                    if item_to_carry_over:
+                        log.debug("Adding carried-over item to the new chunk.")
+                        chunk.append(item_to_carry_over)
+                        items_in_primary_chunk += 1
+                        try:
+                            item_bytes = json.dumps(item_to_carry_over).encode('utf-8')
+                            item_size = len(item_bytes)
+                            current_part_size_bytes += item_size
+                            if len(chunk) == 1:
+                                current_part_size_bytes = base_overhead + item_size
+                        except TypeError:
+                            log.warning("Could not encode carried over item when adding to new chunk.")
 
-                # Add item to the current chunk/part
-                chunk.append(item)
-                current_part_size_bytes += item_size + (per_item_overhead if len(chunk)>1 else base_overhead)
+                    # Update indices
+                    if primary_split_needed:
+                        primary_chunk_index += 1
+                        part_file_index = 0
+                        items_in_primary_chunk = 0
+                        if item_to_carry_over: items_in_primary_chunk = 1
+                        log.debug(f"Starting new primary chunk {primary_chunk_index}.")
+                    elif part_split_needed:
+                        part_file_index += 1
+                        log.debug(f"Starting new part {part_file_index} for primary chunk {primary_chunk_index}.")
 
-
+            # End of loop
             # Write any remaining items in the last chunk
             if chunk:
-                _write_chunk(output_prefix, primary_chunk_index, chunk, output_format, part_index=part_file_index, filename_format=filename_format)
+                # If splitting strictly by max_records, no part index needed
+                final_part_index = None if split_by_max_records_only else part_file_index
+                _write_chunk(output_prefix, primary_chunk_index, chunk, output_format, part_index=final_part_index, filename_format=filename_format)
 
             # Report final count if not perfectly divisible by interval
             if item_count_total > last_progress_report_item:
@@ -108,6 +174,7 @@ def split_by_count(input_file, output_prefix, count, path, output_format, max_re
 
     except FileNotFoundError:
         log.error(f"Error: Input file '{input_file}' not found.")
+        return False # Signal failure
     except ijson.JSONError as e:
         # Attempt to extract position info from the error
         position_info = getattr(e, 'pos', None)
@@ -115,8 +182,12 @@ def split_by_count(input_file, output_prefix, count, path, output_format, max_re
         pos_str = f" near position {position_info}" if position_info is not None else ""
         line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
         log.error(f"Error parsing JSON{pos_str}{line_col_str}: {e}.\nCheck input file validity and path '{path}'.")
+        return False # Signal failure
     except Exception as e:
         log.exception(f"An unexpected error occurred during count splitting:") # Use log.exception to include traceback
+        # raise # Re-raise other exceptions to be caught by execute_split
+        return False # Signal failure
+    return True # Signal success
 
 
 def split_by_size(input_file, output_prefix, max_size_bytes, path, output_format, max_records=None, filename_format="{prefix}_{type}_{index:04d}{part}.{ext}"):
@@ -212,18 +283,24 @@ def split_by_size(input_file, output_prefix, max_size_bytes, path, output_format
 
     except FileNotFoundError:
         log.error(f"Error: Input file '{input_file}' not found.")
+        return False # Signal failure
     except ijson.JSONError as e:
         position_info = getattr(e, 'pos', None)
         line, col = getattr(e, 'lineno', None), getattr(e, 'colno', None)
         pos_str = f" near position {position_info}" if position_info is not None else ""
         line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
         log.error(f"Error parsing JSON{pos_str}{line_col_str}: {e}.\nCheck input file validity and path '{path}'.")
+        return False # Signal failure
     except Exception as e:
         log.exception(f"An unexpected error occurred during size splitting:")
+        # raise # Re-raise other exceptions
+        return False # Signal failure
+    return True # Signal success
 
 
 def execute_split(args):
     """Contains the core logic to perform splitting based on parsed arguments."""
+    log.info("Starting JSON splitting process...") # Add start message
     # --- Configure Logging Level ---
     if args.verbose:
         log.setLevel(logging.DEBUG)
@@ -236,10 +313,10 @@ def execute_split(args):
     # 1. Check input file existence and readability
     if not os.path.isfile(args.input_file):
         log.error(f"Input file not found: {args.input_file}")
-        return
+        sys.exit(1) # Exit on error
     if not os.access(args.input_file, os.R_OK):
         log.error(f"Input file is not readable (check permissions): {args.input_file}")
-        return
+        sys.exit(1) # Exit on error
 
     # --- Argument Parsing & Setup ---
     log.debug(f"Input file: {args.input_file}")
@@ -261,7 +338,7 @@ def execute_split(args):
                  raise ValueError("Max size must be positive.")
         except ValueError as e:
             log.error(f"Invalid --max-size value: {e}. Use formats like 100KB, 50MB, 1GB.")
-            return
+            sys.exit(1) # Exit on error
 
     # Create output directory if it doesn't exist and check writability
     output_dir = os.path.dirname(args.output_prefix)
@@ -273,14 +350,14 @@ def execute_split(args):
             # 2. Check if output directory is writable
             if not os.access(output_dir, os.W_OK):
                  log.error(f"Output directory is not writable (check permissions): {output_dir}")
-                 return
+                 sys.exit(1) # Exit on error
         except OSError as e:
              log.error(f"Failed to create or access output directory '{output_dir}': {e}")
-             return # Exit if cannot create dir
+             sys.exit(1) # Exit on error
     elif not os.access(os.getcwd(), os.W_OK):
         # If no output dir specified (writing to cwd), check cwd writability
         log.error(f"Current working directory is not writable (check permissions): {os.getcwd()}")
-        return
+        sys.exit(1) # Exit on error
 
     # Enforce jsonl for key splitting for now
     if args.split_by == 'key' and args.output_format == 'json':
@@ -288,43 +365,96 @@ def execute_split(args):
             args.output_format = 'jsonl'
 
     # --- Call the appropriate splitting function ---
-    if args.split_by == 'count':
-        try:
-            count_val = int(args.value)
-            if count_val <= 0:
-                raise ValueError("Count must be a positive integer.")
-            split_by_count(args.input_file, args.output_prefix, count_val, args.path, args.output_format,
-                           max_records=max_records, max_size_bytes=max_size_bytes,
-                           filename_format=args.filename_format)
-        except ValueError:
-             log.error(f"Invalid --value for count: '{args.value}'. Must be a positive integer.")
-             return
+    try:
+        # --- Call the appropriate splitting function ---
+        split_function = None
+        success = True # Assume success initially
 
-    elif args.split_by == 'size':
-        try:
-            size_bytes = _parse_size(args.value)
-            if size_bytes <= 0:
-                raise ValueError("Size must be positive.")
-            # Call the size split function
-            split_by_size(args.input_file, args.output_prefix, size_bytes, args.path, args.output_format,
-                          max_records=max_records,
-                          filename_format=args.filename_format) # max_size_bytes is primary here, so less relevant as secondary
-        except ValueError as e:
-            log.error(f"Invalid --value for size: {e}. Use formats like 100KB, 50MB, 1GB.")
-            return
-    elif args.split_by == 'key':
-        key_name = args.value
-        if not key_name:
-            log.error("--value must provide a non-empty key name for key-based splitting.")
-            return
-        split_by_key(args.input_file, args.output_prefix, key_name, args.path, args.output_format,
-                       max_records=max_records, max_size_bytes=max_size_bytes,
-                       on_missing_key=args.on_missing_key, on_invalid_item=args.on_invalid_item,
-                       filename_format=args.filename_format)
+        if args.split_by == 'count':
+            try:
+                count_val = int(args.value)
+                if count_val <= 0:
+                    raise ValueError("Count must be a positive integer.")
+                split_function = split_by_count
+                kwargs = {
+                    'count': count_val,
+                    'max_records': max_records,
+                    'max_size_bytes': max_size_bytes,
+                    'filename_format': args.filename_format
+                }
+            except ValueError:
+                 log.error(f"Invalid --value for count: '{args.value}'. Must be a positive integer.")
+                 sys.exit(1)
 
+        elif args.split_by == 'size':
+            try:
+                size_bytes = _parse_size(args.value)
+                if size_bytes <= 0:
+                    raise ValueError("Size must be positive.")
+                split_function = split_by_size
+                kwargs = {
+                    'max_size_bytes': size_bytes,
+                    'max_records': max_records,
+                    'filename_format': args.filename_format
+                }
+            except ValueError as e:
+                log.error(f"Invalid --value for size: {e}. Use formats like 100KB, 50MB, 1GB.")
+                sys.exit(1)
+
+        elif args.split_by == 'key':
+            key_name = args.value
+            if not key_name:
+                log.error("--value must provide a non-empty key name for key-based splitting.")
+                sys.exit(1)
+
+            key_default_format = "{prefix}_key_{index}{part}.{ext}"
+            count_size_default_format = "{prefix}_{type}_{index:04d}{part}.{ext}"
+            effective_filename_format = args.filename_format
+            if effective_filename_format == count_size_default_format:
+                log.debug(f"Using default filename format for key splitting: '{key_default_format}'")
+                effective_filename_format = key_default_format
+
+            split_function = split_by_key
+            kwargs = {
+                'key_name': key_name,
+                'max_records': max_records,
+                'max_size_bytes': max_size_bytes,
+                'on_missing_key': args.on_missing_key,
+                'on_invalid_item': args.on_invalid_item,
+                'filename_format': effective_filename_format
+            }
+
+        else:
+            # This case should not be reachable due to choices constraint
+            log.error(f"Internal error: Splitting by '{args.split_by}' is not implemented.")
+            sys.exit(1)
+
+        # Execute the chosen split function
+        result = split_function(
+            input_file=args.input_file,
+            output_prefix=args.output_prefix,
+            path=args.path,
+            output_format=args.output_format,
+            **kwargs
+        )
+        # Check result: Split functions should return False or raise Exception on failure/policy stop
+        if result is False:
+             log.error("Splitting process terminated early due to configuration policy (e.g., on-missing-key=error).")
+             success = False
+
+    except (ijson.JSONError, FileNotFoundError, IOError) as e:
+        log.error(f"Splitting failed due to input/output error: {e}")
+        success = False
+    except Exception as e:
+        # Catch unexpected errors from split functions or argument processing
+        log.exception(f"An unexpected error occurred during splitting execution: {e}")
+        success = False
+
+    if success:
+        log.info("Splitting process completed successfully.")
     else:
-        # This case should not be reachable due to choices constraint
-        log.error(f"Internal error: Splitting by '{args.split_by}' is not implemented.")
+        log.error("Splitting process failed or was terminated early.")
+        sys.exit(1) # Ensure exit code is non-zero on failure
 
 # --- Helper Functions for Interactive Mode ---
 
@@ -588,27 +718,45 @@ def main():
 
 # Helper function to parse size strings (e.g., "100MB")
 def _parse_size(size_str):
-    size_str = size_str.strip().upper() # Strip whitespace before parsing
+    """Parses a size string (e.g., 100KB, 5MB, 1GB, 150B, 2048) into bytes."""
+    size_str_orig = size_str # Keep original for error messages
+    size_str = size_str.strip().upper()
+    if not size_str:
+        raise ValueError("Size string cannot be empty.")
+
+    multiplier = 1
+    suffix = None
     if size_str.endswith('KB'):
-        return int(size_str[:-2]) * 1024
+        multiplier = 1024
+        suffix = 'KB'
     elif size_str.endswith('MB'):
-        return int(size_str[:-2]) * 1024 * 1024
+        multiplier = 1024 * 1024
+        suffix = 'MB'
     elif size_str.endswith('GB'):
-        return int(size_str[:-2]) * 1024 * 1024 * 1024
-    elif size_str.isdigit():
-        # Check if it's just digits (bytes)
-        return int(size_str)
-    else:
-        # Handle potential non-numeric prefix before unit
-        match = re.match(r'^(\d+)(KB|MB|GB)$', size_str)
-        if match:
-            val = int(match.group(1))
-            unit = match.group(2)
-            if unit == 'KB': return val * 1024
-            if unit == 'MB': return val * 1024 * 1024
-            if unit == 'GB': return val * 1024 * 1024 * 1024
-        # If no pattern matches
-        raise ValueError(f"Invalid size format: '{size_str}'. Use numbers optionally followed by KB, MB, GB.")
+        multiplier = 1024 * 1024 * 1024
+        suffix = 'GB'
+    elif size_str.endswith('B'): # Handle explicit bytes suffix
+        multiplier = 1
+        suffix = 'B'
+    # No else here, check if the remaining part is numeric after potentially stripping suffix
+
+    numeric_part = size_str
+    if suffix:
+        numeric_part = size_str[:-len(suffix)].strip()
+
+    if not numeric_part:
+         raise ValueError(f"Missing numeric value before suffix in '{size_str_orig}'.")
+
+    try:
+        # Use float first to allow for decimal values (e.g., 1.5MB)
+        # then convert to int after multiplying
+        value = float(numeric_part)
+        if value < 0:
+             raise ValueError("Size value cannot be negative.")
+        return int(value * multiplier)
+    except ValueError:
+         # Raise specific error if conversion fails
+         raise ValueError(f"Invalid numeric value '{numeric_part}' in size string '{size_str_orig}'.")
 
 # Helper function to write chunks consistently
 def _write_chunk(output_prefix, primary_index, chunk_data, output_format, part_index=None,
@@ -657,7 +805,7 @@ def _write_chunk(output_prefix, primary_index, chunk_data, output_format, part_i
                     outfile.write('\n')
             else: # Default to json
                 # Ensure the output is a valid JSON structure (usually an array)
-                json.dump(chunk_data, outfile, indent=4)
+                json.dump(chunk_data, outfile, indent=None) # Changed indent to None
     except IOError as e:
         log.error(f"Error writing to file {output_filename}: {e}")
     except TypeError as e:
@@ -679,31 +827,43 @@ def _sanitize_filename(value):
     """
     # Convert to string
     s_value = str(value)
-    # Remove leading/trailing whitespace
+    log.debug(f"Sanitizing value: '{s_value}'")
+    # Remove leading/trailing whitespace FIRST
     s_value = s_value.strip()
-    # Replace spaces and problematic characters with underscores
-    # Added '+' to handle sequences of problematic chars as one underscore
-    s_value = re.sub(r'[\\s\\\\/:*?\"<>|]+', '_', s_value)
-    # Remove any leading/trailing underscores that might result
+    # Replace sequences of spaces and problematic characters with a SINGLE underscore
+    # Problematic chars: \ / : * ? " < > |
+    s_value = re.sub(r'[\\s\\/:*?"<>|]+', '_', s_value)
+    # Remove any leading/trailing underscores that might result from replacement
     s_value = s_value.strip('_')
     # Ensure filename is not empty after sanitization
     if not s_value:
         s_value = "__empty__"
+        log.debug("Sanitized value was empty, using '__empty__'")
+
     # Limit length to avoid issues on some filesystems (e.g., 255 bytes common limit)
     # Encode to check byte length, common limit is often byte-based
     try:
         encoded_value = s_value.encode('utf-8')
-        max_len = 100 # Keep reasonably short for readability, adjust if needed
-        if len(encoded_value) > max_len:
+        max_len_bytes = 100 # Keep reasonably short for readability, adjust if needed
+        if len(encoded_value) > max_len_bytes:
+            log.debug(f"Original sanitized value '{s_value}' ({len(encoded_value)} bytes) exceeds limit {max_len_bytes}. Truncating...")
             # Find cut-off point respecting UTF-8 character boundaries
-            while len(encoded_value[:max_len]) > max_len:
-                 max_len -=1
-            s_value = encoded_value[:max_len].decode('utf-8', 'ignore') # Decode back safely
-            log.debug(f"Sanitized filename truncated to max length: '{s_value}'")
+            # Iterate backwards from max_len_bytes-1 until we find the start of a valid char
+            byte_index = max_len_bytes - 1
+            while byte_index >= 0 and (encoded_value[byte_index] & 0xC0) == 0x80: # Check if it's a continuation byte (10xxxxxx)
+                 byte_index -= 1
+            # Now byte_index is at the start of the last full character within the limit, or -1
+            if byte_index < 0:
+                s_value = "" # Cannot truncate safely
+            else:
+                 # Slice up to and including the start byte of the last valid character
+                 s_value = encoded_value[:byte_index+1].decode('utf-8', 'ignore')
+            log.debug(f"Sanitized filename truncated to: '{s_value}' ({len(s_value.encode('utf-8'))} bytes)")
     except Exception as e:
          log.warning(f"Could not properly truncate sanitized filename '{s_value}': {e}")
          s_value = s_value[:100] # Fallback to simple char length limit
 
+    log.debug(f"Final sanitized filename part: '{s_value}'")
     return s_value
 
 def split_by_key(input_file, output_prefix, key_name, path, output_format,
@@ -716,6 +876,7 @@ def split_by_key(input_file, output_prefix, key_name, path, output_format,
     # Value: { 'handle': file_handle, 'count': current_record_count, 'size': current_estimated_size, 'part': current_part_index }
     key_states = {}
     total_items_processed = 0
+    success = True # Overall success flag for the function
     # WARNING: Storing state for every unique key can consume significant memory if the number of unique keys is very large.
     # Consider pre-processing or filtering if memory usage becomes an issue.
     MAX_UNIQUE_KEYS_WARN_THRESHOLD = 1000 # Threshold to warn about potential memory issues
@@ -743,40 +904,45 @@ def split_by_key(input_file, output_prefix, key_name, path, output_format,
                 if item_count_total % PROGRESS_REPORT_INTERVAL == 0:
                     log.info(f"  Processed {item_count_total} items...")
                     last_progress_report_item = item_count_total
+                # Update total items processed reliably here
+                total_items_processed = item_count_total
                 # ---
 
-                # Handle non-dict items based on configuration
+                # 1. Handle non-dict items
                 if not isinstance(item, dict):
                     msg = f"Item {item_count_total} at path '{path}' is not an object/dict (type: {type(item)})."
                     if on_invalid_item == 'error':
                         log.error(msg)
-                        raise TypeError(msg)
+                        log.critical("Exiting due to invalid item type with 'error' policy.")
+                        success = False # Set failure flag
+                        break # Exit loop immediately
                     elif on_invalid_item == 'skip':
-                        log.warning(f"Skipping: {msg}")
+                        log.debug(f"Skipping: {msg}")
                         continue
                     else: # Default: warn
                         log.warning(f"{msg} Skipping key check for this item.")
-                        continue # Still skip processing this item
+                        continue
 
+                # 2. Determine key value and handle missing/complex keys
                 try:
                     key_value = item.get(key_name)
-                    sanitized_value = ""
-                    should_process = True
+                    sanitized_value = None # Reset for each item
+                    should_skip_item = False
 
                     if key_value is None:
-                        # Handle missing key based on configuration
                         if on_missing_key == 'error':
                             msg = f"Key '{key_name}' not found in item {item_count_total}."
                             log.error(msg)
-                            raise KeyError(msg)
+                            log.critical("Exiting due to missing key with 'error' policy.")
+                            success = False # Set failure flag
+                            break # Exit loop immediately
                         elif on_missing_key == 'skip':
-                            log.warning(f"Skipping item {item_count_total}: Key '{key_name}' not found.")
-                            should_process = False
+                            log.debug(f"Skipping item {item_count_total}: Key '{key_name}' not found.")
+                            should_skip_item = True
                         else: # Default: group
                             sanitized_value = "__missing_key__"
                             log.debug(f"Item {item_count_total}: Key '{key_name}' missing, grouping as '{sanitized_value}'.")
                     elif isinstance(key_value, (dict, list)):
-                        # Handle complex types - use a generic name but log warning
                         complex_type_name = type(key_value).__name__
                         sanitized_value = f"__complex_type_{_sanitize_filename(complex_type_name)}__"
                         log.warning(f"Key '{key_name}' in item {item_count_total} has complex type ({complex_type_name}). Grouping into '{sanitized_value}'.")
@@ -784,80 +950,92 @@ def split_by_key(input_file, output_prefix, key_name, path, output_format,
                         sanitized_value = _sanitize_filename(key_value)
                         log.debug(f"Item {item_count_total}: Key '{key_name}' value '{key_value}' sanitized to '{sanitized_value}'.")
 
-                    if not should_process:
+                    if should_skip_item:
+                        continue # Move to next item if skip policy applied
+
+                    # Ensure we have a sanitized value (should always be true unless skipped)
+                    if sanitized_value is None:
+                        log.error(f"Internal error: Sanitized value is None for item {item_count_total}. Skipping.")
                         continue
 
-                    # Get or initialize state for this key value
+                    # 3. Get or Initialize State for this Key
                     if sanitized_value not in key_states:
-                        # Check if we are exceeding the key threshold before adding a new one
                         if not warned_about_keys and len(key_states) >= MAX_UNIQUE_KEYS_WARN_THRESHOLD:
                             log.warning(f"Processing a large number (> {MAX_UNIQUE_KEYS_WARN_THRESHOLD}) of unique key values ('{key_name}').")
                             log.warning("  This may consume significant memory. Consider pre-filtering data or increasing available memory.")
-                            warned_about_keys = True # Show warning only once
-
+                            warned_about_keys = True
                         log.debug(f"Initializing state for new key value: '{sanitized_value}' (original: '{key_value}')")
                         key_states[sanitized_value] = {
-                            'handle': None, # Will be opened later
-                            'count': 0,
-                            'size': base_overhead,
-                            'part': 0
+                            'handle': None, 'count': 0, 'size': base_overhead, 'part': 0
                         }
                     state = key_states[sanitized_value]
 
-                    # Estimate item size and prepare serialized string if needed
+                    # 4. Estimate item size AND serialize (only once)
                     item_size = 0
-                    item_str = None # Store serialized string for potential reuse
-                    if max_size_bytes:
+                    item_str = None
+                    try:
+                        item_str = json.dumps(item)
+                        # Estimate size only if max_size_bytes is relevant
+                        if max_size_bytes:
+                             item_bytes = item_str.encode('utf-8')
+                             item_size = len(item_bytes)
+                    except TypeError as e:
+                        log.warning(f"Could not serialize item {item_count_total} (key: {sanitized_value}): {e}. Skipping size/write.")
+                        item_str = None # Ensure skip if serialization fails
+                        item_size = 0
+                        # Continue to next item if we can't even serialize it?
+                        # continue # Maybe too aggressive, let write logic handle None item_str
+
+                    # If serialization failed, skip to next item
+                    if item_str is None:
+                        continue
+
+                    # 5. Tentatively update state (simulate adding item)
+                    potential_new_count = state['count'] + 1
+                    potential_new_size = state['size'] + item_size + per_item_overhead
+
+                    # 6. Check if split is needed BEFORE adding
+                    needs_new_part = False
+                    split_reason = ""
+
+                    if state['handle'] is not None and not state['handle'].closed:
+                         # Check record limit first (using potential count)
+                         if max_records and potential_new_count > max_records:
+                             needs_new_part = True
+                             split_reason = f"record limit ({max_records})"
+                         # Check size limit (using potential size)
+                         elif max_size_bytes and potential_new_size > max_size_bytes and state['count'] > 0:
+                             # Only trigger size split if file not empty
+                             needs_new_part = True
+                             split_reason = f"size limit (~{max_size_bytes / (1024*1024):.2f}MB)"
+
+                    # 7. If split needed, finalize previous part and reset state
+                    if needs_new_part:
+                        log.debug(f"Split needed for key '{sanitized_value}' part {state['part']} due to {split_reason}. Closing file before writing item {item_count_total}.")
                         try:
-                            # Serialize once
-                            item_str = json.dumps(item)
-                            item_bytes = item_str.encode('utf-8') # Encode only for size calculation
-                            item_size = len(item_bytes)
-                        except TypeError as e:
-                            log.warning(f"Could not serialize item {item_count_total} (key: {sanitized_value}) to estimate size: {e}. Skipping size check.")
-                            item_size = 0
-                            item_str = None # Ensure it's None if serialization failed
-
-                    # Check if secondary limits require a new file part *for this key*
-                    split_needed = False
-                    if state['handle'] is not None: # Don't split if file not even open yet
-                        # 1. Max records limit reached for this key's current part
-                        if max_records and state['count'] >= max_records:
-                            log.debug(f"Max records ({max_records}) reached for key '{sanitized_value}', part {state['part']}.")
-                            split_needed = True
-                        # 2. Max size limit reached for this key's current part (use pre-calculated size)
-                        elif max_size_bytes and (state['size'] + item_size + per_item_overhead) > max_size_bytes:
-                            log.debug(f"Max size (~{max_size_bytes / (1024*1024):.2f}MB) reached for key '{sanitized_value}', part {state['part']}.")
-                            split_needed = True
-
-                    if split_needed:
-                        # Close current file, increment part index, reset state
-                        if state['handle'] and not state['handle'].closed:
-                            log.debug(f"Closing file for key '{sanitized_value}', part {state['part']}.")
-                            state['handle'].close()
+                            if state['handle']:
+                                state['handle'].close()
+                        except IOError as e:
+                            log.warning(f"Error closing file for key '{sanitized_value}', part {state['part']}: {e}")
+                        state['handle'] = None # Mark handle as closed/needs opening
                         state['part'] += 1
+                        state['count'] = 0 # Reset for new part
+                        state['size'] = base_overhead # Reset for new part
                         log.debug(f"Starting new part {state['part']} for key '{sanitized_value}'.")
-                        state['count'] = 0
-                        state['size'] = base_overhead
-                        state['handle'] = None # Mark handle as needing reopening
 
-                    # Open file if needed (first time or after a split)
+                    # 8. Open file if handle is None (first time or after closing for new part)
                     if state['handle'] is None:
                         part_suffix = f"_part_{state['part']:04d}" if state['part'] > 0 else ""
-                        # Prepare args for key-based filename formatting
                         format_args = {
-                            'prefix': output_prefix,
-                            'type': 'key',
-                            'index': sanitized_value, # Key value itself serves as the index here
-                            'part': part_suffix,
-                            'ext': file_format_extension
+                            'prefix': output_prefix, 'type': 'key', 'index': sanitized_value,
+                            'part': part_suffix, 'ext': file_format_extension
                         }
                         try:
                             output_filename = filename_format.format(**format_args)
+                            # Basic validation for generated filename
                             if not output_filename or '/' in os.path.basename(output_filename) or '\\' in os.path.basename(output_filename):
-                                 log.warning(f"Generated filename '{output_filename}' seems invalid. Using default key naming.")
-                                 output_filename = f"{output_prefix}_key_{sanitized_value}{part_suffix}.{file_format_extension}"
-
+                                log.warning(f"Generated filename '{output_filename}' seems invalid using format '{filename_format}'. Using default key naming.")
+                                output_filename = f"{output_prefix}_key_{sanitized_value}{part_suffix}.{file_format_extension}"
                         except KeyError as e:
                             log.error(f"Invalid placeholder '{e}' in --filename-format: '{filename_format}'. Using default key naming.")
                             output_filename = f"{output_prefix}_key_{sanitized_value}{part_suffix}.{file_format_extension}"
@@ -865,95 +1043,92 @@ def split_by_key(input_file, output_prefix, key_name, path, output_format,
                             log.error(f"Error formatting filename for key '{sanitized_value}': {e}. Using default key naming.")
                             output_filename = f"{output_prefix}_key_{sanitized_value}{part_suffix}.{file_format_extension}"
 
-
-                        log.info(f"  Opening/Appending to file for key value '{key_value}' (Group: '{sanitized_value}'): {output_filename}")
+                        log.info(f"  Opening/Appending to file for key value '{key_value if key_value is not None else '[Missing Key]'}' (Group: '{sanitized_value}'): {output_filename}")
                         try:
-                            # Use append mode 'a' - handles both creation and continuing after split
+                            output_dir = os.path.dirname(output_filename)
+                            if output_dir:
+                                os.makedirs(output_dir, exist_ok=True)
                             state['handle'] = open(output_filename, 'a', encoding='utf-8')
-                            state['count'] = 0 # Reset count for new file/part
-                            state['size'] = base_overhead # Reset size for new file/part
                         except IOError as e:
-                             log.error(f"Failed to open file '{output_filename}' for key '{sanitized_value}': {e}. Skipping item {item_count_total}.")
-                             # Don't process this item if file open failed
-                             state['handle'] = None # Ensure handle remains None
-                             continue # Move to next item
+                            log.error(f"Failed to open file '{output_filename}' for key '{sanitized_value}': {e}. Processing cannot continue for this key.")
+                            log.critical("Exiting due to file open error.")
+                            state['handle'] = None # Ensure handle is None
+                            success = False # Set failure flag
+                            break # Exit loop
 
-                    # Write the item as a JSON line
-                    # Use pre-serialized string if available, otherwise serialize now
-                    try:
-                        if item_str is not None:
-                            state['handle'].write(item_str)
-                        else:
-                            json.dump(item, state['handle']) # Fallback if size wasn't checked or serialization failed before
-                        state['handle'].write('\n')
-                        state['count'] += 1
-                        state['size'] += item_size + per_item_overhead # Use pre-calculated item_size
-                    except IOError as e:
-                        log.error(f"Error writing item {item_count_total} for key value '{sanitized_value}' to {state['handle'].name}: {e}. Attempting to continue.")
-                        # Mark handle as needing potential reopening/checking later if needed
-                        if state['handle']:
-                            try:
-                                state['handle'].close() # Attempt to close cleanly
-                            except IOError:
-                                pass # Ignore error on close if write already failed
-                            state['handle'] = None # Mark as needing reopen on next write for this key
+                    # 9. Write the item string to the (now guaranteed open) file handle
+                    if state['handle'] is not None and not state['handle'].closed:
+                        try:
+                            state['handle'].write(item_str + '\n') # Write the pre-serialized string
+                            # Update state AFTER successful write
+                            state['count'] += 1
+                            state['size'] += item_size + per_item_overhead
+                            # Correct size if it was the first item
+                            if state['count'] == 1:
+                                state['size'] = base_overhead + item_size
 
-                except KeyError as e:
-                    # This might now be triggered by on_missing_key='error'
-                    log.error(f"Processing stopped at item {item_count_total} due to missing key error: {e}")
-                    raise # Re-raise the error to stop processing
-                except TypeError as e:
-                    # Handle error from isinstance check or other type issues
-                    msg = f"Error processing item {item_count_total}: {e}"
-                    if on_invalid_item == 'error': # Check if error came from initial type check
-                         log.error(msg)
-                         raise
+                        except IOError as e:
+                            log.error(f"Error writing item {item_count_total} for key '{sanitized_value}' to {state['handle'].name}: {e}. Processing cannot continue.")
+                            success = False # Set failure flag
+                            break # Exit loop
                     else:
-                         log.warning(f"{msg}. Skipping item.")
-                # Removed the IOError catch here as it's handled within the write block now
+                         # This case implies file opening failed earlier and loop should have broken
+                         log.error(f"Internal error: File handle for key '{sanitized_value}' was not valid before writing item {item_count_total}. Skipping.")
 
+                except Exception as e:
+                    # Catch unexpected errors during item processing for a specific key
+                    log.exception(f"Unexpected error processing item {item_count_total} for key '{key_value}': {e}")
+                    success = False # Assume failure on unexpected error
+                    break # Exit loop
 
-        log.info("\nSplitting complete.")
-        # Report final count if not perfectly divisible by interval
-        if total_items_processed > last_progress_report_item:
-            log.info(f"  Processed {total_items_processed} items total.")
-        log.info(f"Total items processed: {total_items_processed}")
-        # Summarize files (more complex now with parts)
-        log.info("File summary (check output directory for parts based on secondary limits):")
-        key_groups = sorted(list(key_states.keys())) # Sort for consistent output
-        for value in key_groups:
-            base_filename = f"{output_prefix}_key_{value}"
-            log.info(f"  - Key Value Group '{value}': Started with {base_filename}*.jsonl")
-        if "__missing_key__" in key_states:
-             log.info(f"    (Items where key '{key_name}' was missing were grouped into '__missing_key__' files)")
+            # End of item processing loop
 
-    except FileNotFoundError:
+        # After loop finishes or breaks
+        if success:
+            log.info("\nSplitting loop finished.")
+            # Report final count if not perfectly divisible by interval
+            if total_items_processed > last_progress_report_item:
+                log.info(f"  Processed {total_items_processed} items total.")
+            log.info(f"Total items processed: {total_items_processed}")
+            # Summarize files
+            log.info("File summary (check output directory for parts based on secondary limits):")
+            key_groups = sorted(list(key_states.keys()))
+            for value in key_groups:
+                base_filename = f"{output_prefix}_key_{value}"
+                log.info(f"  - Key Value Group '{value}': Started with {base_filename}*.jsonl")
+            if "__missing_key__" in key_states:
+                log.info(f"    (Items where key '{key_name}' was missing were grouped into '__missing_key__' files)")
+        else:
+             log.error("Splitting loop terminated due to error.")
+
+    except FileNotFoundError as e:
         log.error(f"Input file '{input_file}' not found.")
+        success = False # Signal failure
     except ijson.JSONError as e:
         position_info = getattr(e, 'pos', None)
         line, col = getattr(e, 'lineno', None), getattr(e, 'colno', None)
         pos_str = f" near position {position_info}" if position_info is not None else ""
         line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
         log.error(f"Error parsing JSON{pos_str}{line_col_str}: {e}.\nCheck input file validity and path '{path}'.")
-    except (KeyError, TypeError) as e: # Catch errors raised by config options
-        log.error(f"Processing stopped due to configuration rule violation: {e}")
+        success = False # Signal failure
     except Exception as e:
-        log.exception(f"An unexpected error occurred during key splitting:") # Use log.exception for traceback
+        log.exception(f"An unexpected error occurred during key splitting setup or file iteration:")
+        success = False # Signal failure
     finally:
-        # Ensure all files are closed gracefully
+        # Ensure all files are closed gracefully, regardless of success/failure
         log.info("\nFinalizing file handles...")
         closed_count = 0
         error_count = 0
-        # Use sorted keys for consistent closing order in logs
         sorted_keys = sorted(list(key_states.keys()))
         for key in sorted_keys:
-            state = key_states[key]
+            state = key_states.get(key)
+            if not state: continue # Should not happen, but safe check
             handle = state.get('handle')
             if handle and not handle.closed:
                  try:
                     log.debug(f"Closing file for key '{key}' ({handle.name}).")
                     handle.close()
-                    state['handle'] = None # Clear handle in state
+                    state['handle'] = None
                     closed_count += 1
                  except Exception as e:
                      error_count += 1
@@ -962,6 +1137,8 @@ def split_by_key(input_file, output_prefix, key_name, path, output_format,
             log.info(f"Closed {closed_count} output file(s) successfully.")
         if error_count > 0:
             log.warning(f"Encountered errors closing {error_count} file(s). Data might be partially written.")
+
+    return success # Return the overall success flag
 
 
 if __name__ == "__main__":

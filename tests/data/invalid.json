@@ -1,0 +1,5 @@
+[
+    {"id": 1, "name": "Valid Item"},
+    {"id": 2, "name": "Item with trailing comma"},,
+    {"id": 3, name: "Unquoted key"}
+] 

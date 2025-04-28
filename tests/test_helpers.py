@@ -5,7 +5,6 @@ import os
 # Add project root to the Python path to allow importing the main module
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Assuming your main script is src/json_splitter.py
 # Adjust the import based on your actual structure if needed
 from src.json_splitter import _parse_size, _sanitize_filename
 

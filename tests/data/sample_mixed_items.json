@@ -1,0 +1,9 @@
+[
+    {"id": 1, "category": "A"},
+    "invalid_string_item",
+    {"id": 2, "category": "B"},
+    {"id": 3 },
+    12345,
+    {"id": 4, "category": "A"},
+    {"id": 5, "category": "B"}
+] 
