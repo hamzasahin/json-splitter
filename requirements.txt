@@ -1,2 +1,5 @@
 ijson
-pytest # For running tests 
+pytest # For running tests
+click
+rich
+cachetools 
