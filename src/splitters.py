@@ -4,19 +4,21 @@ import os
 import logging
 from cachetools import LRUCache
 
-from .utils import log, parse_size, sanitize_filename, PROGRESS_REPORT_INTERVAL
+from .utils import log, parse_size, sanitize_filename, PROGRESS_REPORT_INTERVAL, ProgressTracker
 
 MAX_OPEN_FILES_KEY_SPLIT = 1000 # Max files to keep open during key splitting
 
 class SplitterBase:
     """Base class for all splitting strategies."""
 
-    PROGRESS_INTERVAL = PROGRESS_REPORT_INTERVAL # Use constant from utils
+    # PROGRESS_INTERVAL = PROGRESS_REPORT_INTERVAL # Commented out/removed old constant use
 
     def __init__(self, input_file, output_prefix, path, output_format,
                  max_records=None, max_size=None, # Use max_size string here
                  filename_format=None, verbose=False,
-                 created_files_set=None, **kwargs): # Accept extra args
+                 created_files_set=None,
+                 report_interval: int = 10000, # Added report_interval parameter
+                 **kwargs): # Accept extra args
         self.input_file = input_file
         self.output_prefix = output_prefix
         self.path = path if path else '' # Ensure path is not None
@@ -37,6 +39,7 @@ class SplitterBase:
         self.verbose = verbose
         self.created_files_set = created_files_set if created_files_set is not None else set()
         self.log = log # Use the logger from utils
+        self._report_interval = report_interval # Store report_interval
 
         # Set logging level based on verbose flag
         if self.verbose:
@@ -49,9 +52,12 @@ class SplitterBase:
         raise NotImplementedError()
 
     def _progress_report(self, item_count_total, last_report):
-        """Common progress reporting."""
-        if item_count_total % self.PROGRESS_INTERVAL == 0:
-            self.log.info(f"  Processed {item_count_total} items...")
+        """Common progress reporting. [DEPRECATED - Use ProgressTracker]"""
+        # This method is now deprecated in favor of the ProgressTracker class
+        # Keeping it briefly for reference during transition, can be removed later.
+        report_interval = getattr(self, '_report_interval', 10000) # Get interval if available
+        if report_interval > 0 and item_count_total % report_interval == 0:
+            self.log.info(f"  [Legacy Report] Processed {item_count_total} items...")
             return item_count_total
         return last_report
 
@@ -191,6 +197,9 @@ class CountSplitter(SplitterBase):
                 if self.max_records: self.log.info(f"  Secondary limit: Max {self.max_records} records per file part.")
                 if self.max_size_bytes: self.log.info(f"  Secondary limit: Max ~{self.max_size_bytes / (1024*1024):.2f} MB per file part.")
 
+            # Initialize Progress Tracker
+            tracker = ProgressTracker(logger=self.log, report_interval=self._report_interval)
+
             with open(self.input_file, 'rb') as f:
                 items_iterator = ijson.items(f, self.path)
                 chunk = []
@@ -201,10 +210,11 @@ class CountSplitter(SplitterBase):
                 current_part_size_bytes = 0
                 base_overhead = 2 if self.output_format == 'json' else 0
                 per_item_overhead = 4 if self.output_format == 'json' else 1
-                last_progress_report_item = 0
+                # last_progress_report_item = 0 # Removed legacy tracker var
 
                 for item_count_total, item in enumerate(items_iterator, 1):
-                    last_progress_report_item = self._progress_report(item_count_total, last_progress_report_item)
+                    # last_progress_report_item = self._progress_report(item_count_total, last_progress_report_item) # Removed legacy call
+                    tracker.update(item_count_total) # Call new tracker update
 
                     # Mode 1: Split strictly by max_records
                     if split_by_max_records_only:
@@ -259,47 +269,56 @@ class CountSplitter(SplitterBase):
                         primary_split_needed = True
                         part_split_needed = False # Primary takes precedence
 
-                    # Perform write and reset if needed
-                    if primary_split_needed or part_split_needed:
-                        self._write_chunk(primary_chunk_index, chunk, part_index=part_file_index, split_type='chunk')
+                    # Perform splits if needed
+                    if part_split_needed or primary_split_needed:
+                        data_to_write = chunk if not item_to_carry_over else chunk[:-1] # Don't write carried-over item yet
+                        if part_split_needed and not primary_split_needed:
+                            self.log.debug(f"Writing part {part_file_index} for chunk {primary_chunk_index} due to secondary limit.")
+                        elif primary_split_needed:
+                            self.log.debug(f"Writing final part {part_file_index} for chunk {primary_chunk_index} due to primary limit.")
 
+                        if data_to_write:
+                            self._write_chunk(primary_chunk_index, data_to_write, part_index=part_file_index, split_type='chunk')
+                        else:
+                            self.log.warning(f"Skipping write for chunk {primary_chunk_index} part {part_file_index} as there is no data to write (likely due to carry-over). ")
+
+                        # Reset for next part/chunk
                         chunk = []
-                        current_part_size_bytes = base_overhead
+                        current_part_size_bytes = base_overhead # Start with base overhead
+                        part_file_index += 1 # Increment part index after writing
 
                         if item_to_carry_over:
-                            self.log.debug("Adding carried-over item to the new chunk.")
                             chunk.append(item_to_carry_over)
-                            items_in_primary_chunk += 1 # It's part of the count for the *next* primary chunk determination
+                            items_in_primary_chunk += 1 # Re-add count for carried over
+                            # Recalculate size for the carried-over item
                             try:
-                                item_bytes = json.dumps(item_to_carry_over).encode('utf-8')
+                                item_str = json.dumps(item_to_carry_over)
+                                item_bytes = item_str.encode('utf-8')
                                 item_size = len(item_bytes)
-                                current_part_size_bytes += item_size
-                                if len(chunk) == 1:
-                                    current_part_size_bytes = base_overhead + item_size
-                            except TypeError:
-                                self.log.warning("Could not encode carried over item when adding to new chunk.")
+                            except TypeError: item_size = 0 # Fallback
+                            current_part_size_bytes += item_size
+                            item_to_carry_over = None # Clear carried item
 
-                        # Update indices
                         if primary_split_needed:
                             primary_chunk_index += 1
-                            part_file_index = 0
-                            # Reset count for the new primary chunk, considering carried item
-                            items_in_primary_chunk = len(chunk) # Set count based on what's actually in the new chunk
-                            self.log.debug(f"Starting new primary chunk {primary_chunk_index} with {items_in_primary_chunk} item(s).")
-                        elif part_split_needed:
-                            part_file_index += 1
-                            self.log.debug(f"Starting new part {part_file_index} for primary chunk {primary_chunk_index}.")
+                            items_in_primary_chunk = 0
+                            part_file_index = 0 # Reset part index for new primary chunk
+                            # Reset chunk and size again if it was just populated by carry-over
+                            if chunk: # If carry-over happened
+                                 chunk = []
+                                 current_part_size_bytes = base_overhead
+                                 items_in_primary_chunk = 0
 
-                # Write remaining items
+                # Write any remaining data after the loop
                 if chunk:
-                    final_part_index = None if split_by_max_records_only else part_file_index
-                    self._write_chunk(primary_chunk_index, chunk, part_index=final_part_index, split_type='chunk')
+                    if split_by_max_records_only:
+                         self._write_chunk(primary_chunk_index, chunk, part_index=None, split_type='chunk')
+                    else:
+                        # Use the current primary_chunk_index and part_file_index for the last file
+                         self._write_chunk(primary_chunk_index, chunk, part_index=part_file_index, split_type='chunk')
 
-                if item_count_total > last_progress_report_item:
-                    self.log.info(f"  Processed {item_count_total} items total.")
-
-                self.log.info(f"Splitting complete. Total items processed: {item_count_total}.")
-            return True # Success
+            tracker.finalize() # Call finalize after loop
+            return True # Indicate success
 
         except FileNotFoundError:
             self.log.error(f"Error: Input file '{self.input_file}' not found.")
@@ -321,118 +340,120 @@ class CountSplitter(SplitterBase):
 
 
 class SizeSplitter(SplitterBase):
-    """Splits JSON array/objects based on approximate output file size."""
+    """Splits JSON array/objects based on approximate size."""
+
     def __init__(self, size, **kwargs):
         # Special handling for size: parse it in the base class init
         # We expect max_size to be passed here as 'size' for consistency with CLI args
-        super().__init__(max_size=size, **kwargs)
-        if self.max_size_bytes is None: # Check if parsing failed in base
-            raise ValueError("Size value is required and must be valid for SizeSplitter.")
-        self.primary_max_size_bytes = self.max_size_bytes # Store the primary size limit
-        # For SizeSplitter, max_size is primary, max_records is secondary
-        # Reset max_size_bytes inherited from base if it was set via --max-size (secondary)
-        # Base init already parsed the *primary* size arg into self.max_size_bytes
-        # We need to parse the *secondary* max_size if provided separately
-        secondary_max_size_str = kwargs.get('max_size') # Get secondary max_size if passed
-        self.secondary_max_size_bytes = None
-        if secondary_max_size_str and secondary_max_size_str != size: # Avoid re-parsing primary
-             try:
-                 self.secondary_max_size_bytes = parse_size(secondary_max_size_str)
-                 if self.secondary_max_size_bytes <= 0:
-                    raise ValueError("Secondary max size must be positive.")
-             except ValueError as e:
-                 log.error(f"Invalid secondary --max-size value: {e}.")
-                 raise
+        if 'max_size' in kwargs:
+            log.warning("Both 'size' and 'max_size' provided to SizeSplitter; using 'size'.")
+            kwargs['max_size'] = size # Ensure base class gets the primary value
+        else:
+             kwargs['max_size'] = size # Pass size as max_size to base
 
-        # Keep secondary max_records as is from base init
-        self.secondary_max_records = self.max_records
+        super().__init__(**kwargs)
+
+        # Primary limit is the size provided
+        self.primary_size_limit_bytes = self.max_size_bytes
+        if self.primary_size_limit_bytes is None:
+             # This should have been caught by base class or earlier validation
+             raise ValueError("SizeSplitter requires a valid size argument.")
+
+        # Secondary limit is max_records
+        self.secondary_record_limit = self.max_records
+
+        # Reset max_size_bytes in base class context as it's now the *primary* limit for this splitter
+        # We don't have a tertiary size limit :)
+        self.max_size_bytes = None # Clear secondary size limit from base perspective
+
+        # For clarity in SizeSplitter, refer to primary limit directly
+        self.size = self.primary_size_limit_bytes
 
     def split(self):
+        self.log.info(f"Splitting '{self.input_file}' at path '{self.path}' primarily by size={self.max_size_str} (~{self.size / (1024*1024):.2f} MB)...")
+        if self.secondary_record_limit:
+            self.log.info(f"  Secondary limit: Max {self.secondary_record_limit} records per file part.")
+
+        # Initialize Progress Tracker
+        tracker = ProgressTracker(logger=self.log, report_interval=self._report_interval)
+
         try:
-            self.log.info(f"Splitting '{self.input_file}' at path '{self.path}' primarily by size=~{self.primary_max_size_bytes / (1024*1024):.2f} MB...")
-            if self.secondary_max_records: self.log.info(f"  Secondary limit: Max {self.secondary_max_records} records per file part.")
-            # Add log for secondary size limit if applicable (not common for size split)
-            if self.secondary_max_size_bytes: self.log.info(f"  Secondary limit: Max ~{self.secondary_max_size_bytes / (1024*1024):.2f} MB per file part.")
-
-
             with open(self.input_file, 'rb') as f:
                 items_iterator = ijson.items(f, self.path)
                 chunk = []
-                current_chunk_size_bytes = 0
-                file_index = 0
-                part_file_index = 0
+                chunk_index = 0
                 item_count_total = 0
+                current_chunk_size_bytes = 0
+                # Rough estimate of overhead: [] for JSON, newlines for JSONL
                 base_overhead = 2 if self.output_format == 'json' else 0
+                # Rough estimate per item: ',' for JSON, newline for JSONL
                 per_item_overhead = 4 if self.output_format == 'json' else 1
-                last_progress_report_item = 0
+                # last_progress_report_item = 0 # Removed legacy tracker var
 
                 for item_count_total, item in enumerate(items_iterator, 1):
-                    last_progress_report_item = self._progress_report(item_count_total, last_progress_report_item)
+                    # last_progress_report_item = self._progress_report(item_count_total, last_progress_report_item) # Removed legacy call
+                    tracker.update(item_count_total) # Call new tracker update
 
+                    # Calculate item size
                     item_size = 0
                     try:
-                        item_bytes = json.dumps(item).encode('utf-8')
+                        # Serialize item to estimate size
+                        # Using separators=(',', ':') for slightly smaller size, closer to file size
+                        item_str = json.dumps(item, separators=(',', ':'))
+                        item_bytes = item_str.encode('utf-8')
                         item_size = len(item_bytes)
                     except TypeError as e:
-                        self.log.warning(f"Could not serialize item {item_count_total} to estimate size: {e}. Skipping size check.")
+                        self.log.warning(f"Could not serialize item {item_count_total} to estimate size: {e}. Skipping size check for split.")
+                        # Treat as 0 size for splitting logic, but still add to chunk
                         item_size = 0
 
-                    split_needed = False
-                    primary_split_occurred = False
-                    if chunk:
-                        estimated_next_size = current_chunk_size_bytes + item_size + per_item_overhead
-                        # 1. Primary size limit reached?
-                        if estimated_next_size > self.primary_max_size_bytes:
-                            self.log.debug(f"Primary size limit (~{self.primary_max_size_bytes / (1024*1024):.2f}MB) reached for file {file_index}, part {part_file_index}.")
-                            split_needed = True
-                            primary_split_occurred = True
-                        # 2. Secondary records limit reached?
-                        elif self.secondary_max_records and len(chunk) == self.secondary_max_records:
-                            self.log.debug(f"Secondary record limit ({self.secondary_max_records}) reached for file {file_index}, part {part_file_index}.")
-                            split_needed = True
-                        # 3. Secondary size limit reached? (Less common for size split)
-                        elif self.secondary_max_size_bytes and estimated_next_size > self.secondary_max_size_bytes:
-                            self.log.debug(f"Secondary size limit (~{self.secondary_max_size_bytes / (1024*1024):.2f}MB) reached for file {file_index}, part {part_file_index}.")
-                            split_needed = True
+                    # Determine if adding this item exceeds limits
+                    potential_next_size = current_chunk_size_bytes + item_size + (per_item_overhead if chunk else 0)
+                    exceeds_primary_size = potential_next_size > self.size and len(chunk) > 0
+                    exceeds_secondary_records = self.secondary_record_limit and (len(chunk) + 1) > self.secondary_record_limit
 
-
-                    if split_needed:
-                        self._write_chunk(file_index, chunk, part_index=part_file_index, split_type='chunk')
-
-                        if primary_split_occurred:
-                            self.log.debug(f"Starting new primary file {file_index + 1}.")
-                            file_index += 1
-                            part_file_index = 0
+                    # Split if necessary *before* adding the current item
+                    if exceeds_primary_size or exceeds_secondary_records:
+                        if chunk: # Only write if there's something in the current chunk
+                            reason = "size limit" if exceeds_primary_size else "record limit"
+                            self.log.debug(f"Writing chunk {chunk_index} due to {reason} ({len(chunk)} items, ~{current_chunk_size_bytes / (1024*1024):.2f} MB)...")
+                            self._write_chunk(chunk_index, chunk, split_type='chunk')
+                            chunk = []
+                            current_chunk_size_bytes = base_overhead # Reset size
+                            chunk_index += 1
                         else:
-                            self.log.debug(f"Starting new part {part_file_index + 1} for primary file {file_index}.")
-                            part_file_index += 1
+                            # This happens if a single item exceeds the size limit
+                            self.log.warning(f"Item {item_count_total} alone (size ~{item_size / (1024*1024):.2f} MB) may exceed the target chunk size of {self.size / (1024*1024):.2f} MB. Writing it to its own file.")
+                            # We will add it below and potentially write it immediately if it also hits record limit
+                            pass
 
-                        chunk = []
-                        current_chunk_size_bytes = base_overhead
-
-                    # Add item to current chunk
+                    # Add the current item to the (potentially new) chunk
                     chunk.append(item)
+                    # Update size: add item size and overhead if it's not the first item
                     current_chunk_size_bytes += item_size + (per_item_overhead if len(chunk) > 1 else 0)
+                    # Correct size if it's the very first item in the chunk
                     if len(chunk) == 1:
-                         current_chunk_size_bytes = base_overhead + item_size
+                        current_chunk_size_bytes = base_overhead + item_size
 
-                # Write remaining items
+                    # Special case: If the *first* item added also hits the secondary record limit (limit is 1)
+                    if len(chunk) == 1 and self.secondary_record_limit == 1:
+                         self.log.debug(f"Writing chunk {chunk_index} due to record limit=1.")
+                         self._write_chunk(chunk_index, chunk, split_type='chunk')
+                         chunk = []
+                         current_chunk_size_bytes = base_overhead
+                         chunk_index += 1
+
+
+                # Write any remaining items after the loop
                 if chunk:
-                    self._write_chunk(file_index, chunk, part_index=part_file_index, split_type='chunk')
+                     self.log.debug(f"Writing final chunk {chunk_index} ({len(chunk)} items, ~{current_chunk_size_bytes / (1024*1024):.2f} MB)...")
+                     self._write_chunk(chunk_index, chunk, split_type='chunk')
 
-                if item_count_total > last_progress_report_item:
-                    self.log.info(f"  Processed {item_count_total} items total.")
+            tracker.finalize() # Call finalize after loop
+            return True # Indicate success
 
-                self.log.info(f"Splitting complete. Total items processed: {item_count_total}.")
-            return True # Success
-
-        except FileNotFoundError:
-            self.log.error(f"Error: Input file '{self.input_file}' not found.")
-            return False
         except ijson.JSONError as e:
-            line, col = getattr(e, 'lineno', None), getattr(e, 'colno', None)
-            line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
-            self.log.error(f"Error parsing JSON{line_col_str}: {e}.")
+            self.log.error(f"Invalid JSON encountered in '{self.input_file}' at path '{self.path}': {e}")
             return False
         except (IOError, OSError) as e:
             self.log.error(f"File system error during size splitting: {e}")
@@ -472,76 +493,91 @@ class KeySplitter(SplitterBase):
              self.filename_format = default_key_format
 
     def split(self):
-        open_files_cache = LRUCache(maxsize=MAX_OPEN_FILES_KEY_SPLIT)
-        written_keys = set()
-        total_items_processed = 0
-        success = True
-        base_overhead = 0 # jsonl
-        per_item_overhead = 1 # newline
-        last_progress_report_item = 0
+        self.log.info(f"Splitting '{self.input_file}' at path '{self.path}' by key '{self.key_name}'...")
+        self.log.info(f"  Output format forced to: {self.output_format}")
+
+        # File cache: Maps sanitized key value -> open file handle
+        file_cache = LRUCache(maxsize=MAX_OPEN_FILES_KEY_SPLIT)
+        # Track parts per key: Maps sanitized key value -> current part index
+        key_part_indices = {}
+        # Track records/size per *open file*: Maps filename -> (record_count, approx_bytes)
+        file_stats = {}
+
+        # Initialize Progress Tracker
+        tracker = ProgressTracker(logger=self.log, report_interval=self._report_interval)
+
+        items_processed = 0
+        items_written = 0
+        items_skipped_missing_key = 0
+        items_skipped_invalid = 0
+        missing_key_file_handle = None
+        missing_key_filename = None
+        missing_key_part_index = 0
+        missing_key_stats = {'count': 0, 'bytes': 0}
+        success_flag = True # Assume success initially
+        # last_progress_report_item = 0 # Removed legacy var
 
         try:
-            self.log.info(f"Splitting '{self.input_file}' at path '{self.path}' by key '{self.key_name}' (format: {self.file_format_extension})...")
-            self.log.info(f"  Using LRU cache for file handles (max open: {MAX_OPEN_FILES_KEY_SPLIT}).")
-            self.log.info(f"  Config: on-missing={self.on_missing_key}, on-invalid={self.on_invalid_item}")
-            if self.max_records: self.log.info(f"  Secondary limit: Max {self.max_records} records per key file part.")
-            if self.max_size_bytes: self.log.info(f"  Secondary limit: Max ~{self.max_size_bytes / (1024*1024):.2f} MB per key file part.")
-
             with open(self.input_file, 'rb') as f:
                 items_iterator = ijson.items(f, self.path)
 
-                for item_count_total, item in enumerate(items_iterator, 1):
-                    last_progress_report_item = self._progress_report(item_count_total, last_progress_report_item)
-                    total_items_processed = item_count_total
+                for items_processed, item in enumerate(items_iterator, 1):
+                    # last_progress_report_item = self._progress_report(items_processed, last_progress_report_item) # Removed legacy call
+                    tracker.update(items_processed) # Call new tracker update
+
+                    # Validate item type (must be dict-like for key access)
+                    if not isinstance(item, dict):
+                        msg = f"Item {items_processed} at path '{self.path}' is not an object (type: {type(item)})."
+                        if self.on_invalid_item == 'error':
+                            self.log.error(msg)
+                            # Set failure flag and break loop on error
+                            success_flag = False
+                            break
+                        elif self.on_invalid_item == 'skip':
+                            self.log.debug(f"Skipping: {msg}"); continue
+                        else: # warn
+                            self.log.warning(f"{msg} Skipping key check."); continue
 
                     key_value_original = "[unknown]" # For logging
                     try:
-                        if not isinstance(item, dict):
-                            msg = f"Item {item_count_total} at path '{self.path}' is not an object (type: {type(item)})."
-                            if self.on_invalid_item == 'error':
-                                self.log.error(msg)
-                                success = False; break
-                            elif self.on_invalid_item == 'skip':
-                                self.log.debug(f"Skipping: {msg}"); continue
-                            else: # warn
-                                self.log.warning(f"{msg} Skipping key check."); continue
-
                         key_value_original = item.get(self.key_name)
                         sanitized_value = None
                         should_skip_item = False
 
                         if key_value_original is None:
                             if self.on_missing_key == 'error':
-                                self.log.error(f"Key '{self.key_name}' not found in item {item_count_total}.")
-                                success = False; break
+                                self.log.error(f"Key '{self.key_name}' not found in item {items_processed}.")
+                                # Set failure flag and break loop on error
+                                success_flag = False
+                                break
                             elif self.on_missing_key == 'skip':
-                                self.log.debug(f"Skipping item {item_count_total}: Key '{self.key_name}' missing.")
+                                self.log.debug(f"Skipping item {items_processed}: Key '{self.key_name}' missing.")
                                 should_skip_item = True
                             else: # group
                                 sanitized_value = "__missing_key__"
-                                self.log.debug(f"Item {item_count_total}: Key missing, grouping as '{sanitized_value}'.")
+                                self.log.debug(f"Item {items_processed}: Key missing, grouping as '{sanitized_value}'.")
                         elif isinstance(key_value_original, (dict, list)):
                             complex_type = type(key_value_original).__name__
                             sanitized_value = f"__complex_type_{sanitize_filename(complex_type)}__"
-                            self.log.warning(f"Key '{self.key_name}' in item {item_count_total} is complex ({complex_type}). Grouping as '{sanitized_value}'.")
+                            self.log.warning(f"Key '{self.key_name}' in item {items_processed} is complex ({complex_type}). Grouping as '{sanitized_value}'.")
                         else:
                             sanitized_value = sanitize_filename(key_value_original)
-                            self.log.debug(f"Item {item_count_total}: Key '{key_value_original}' sanitized to '{sanitized_value}'.")
+                            self.log.debug(f"Item {items_processed}: Key '{key_value_original}' sanitized to '{sanitized_value}'.")
 
                         if should_skip_item: continue
                         if sanitized_value is None: # Should not happen normally
-                             self.log.error(f"Internal error: Sanitized value is None for item {item_count_total}. Skipping.")
+                             self.log.error(f"Internal error: Sanitized value is None for item {items_processed}. Skipping.")
                              continue
 
                         # LRU Cache Logic
                         state = None
-                        if sanitized_value in open_files_cache:
-                            state = open_files_cache[sanitized_value]
+                        if sanitized_value in file_cache:
+                            state = file_cache[sanitized_value]
                             self.log.debug(f"Cache hit for key '{sanitized_value}'.")
                         else:
                             self.log.debug(f"Cache miss for key '{sanitized_value}'.")
-                            if len(open_files_cache) >= MAX_OPEN_FILES_KEY_SPLIT:
-                                evicted_key, evicted_state = open_files_cache.popitem()
+                            if len(file_cache) >= MAX_OPEN_FILES_KEY_SPLIT:
+                                evicted_key, evicted_state = file_cache.popitem()
                                 self.log.debug(f"Cache full. Evicting state for key '{evicted_key}'.")
                                 try:
                                     handle = evicted_state.get('handle')
@@ -551,11 +587,11 @@ class KeySplitter(SplitterBase):
                                 except IOError as e:
                                     self.log.warning(f"Error closing evicted file for key '{evicted_key}': {e}")
 
-                            mode = 'a' if sanitized_value in written_keys else 'w'
+                            mode = 'a' if sanitized_value in key_part_indices else 'w'
                             self.log.debug(f"Key '{sanitized_value}' mode: '{mode}'.")
-                            state = {'handle': None, 'count': 0, 'size': base_overhead, 'part': 0, 'mode': mode}
-                            # Don't add to written_keys until open succeeds
-                            # Don't add state to cache until open succeeds
+                            state = {'handle': None, 'count': 0, 'size': 0, 'part': 0, 'mode': mode}
+                            # Don't add to key_part_indices until open succeeds
+                            # Don't add state to file_stats until open succeeds
 
                         # Serialize item
                         item_size = 0
@@ -566,12 +602,12 @@ class KeySplitter(SplitterBase):
                                 item_bytes = item_str.encode('utf-8')
                                 item_size = len(item_bytes)
                         except TypeError as e:
-                            self.log.warning(f"Could not serialize item {item_count_total} (key: {sanitized_value}): {e}. Skipping.")
+                            self.log.warning(f"Could not serialize item {items_processed} (key: {sanitized_value}): {e}. Skipping.")
                             continue
 
                         # Check if split is needed BEFORE adding
                         potential_new_count = state['count'] + 1
-                        potential_new_size = state['size'] + item_size + per_item_overhead
+                        potential_new_size = state['size'] + item_size + 1
                         needs_new_part = False
                         split_reason = ""
 
@@ -593,7 +629,7 @@ class KeySplitter(SplitterBase):
                                 self.log.warning(f"Error closing file for key '{sanitized_value}', part {state['part']}: {e}")
                             state['part'] += 1
                             state['count'] = 0
-                            state['size'] = base_overhead
+                            state['size'] = 0
                             state['handle'] = None # Mark handle as needing reopening
                             state['mode'] = 'a' # Subsequent parts always append
                             self.log.debug(f"Starting new part {state['part']} for key '{sanitized_value}'.")
@@ -649,18 +685,18 @@ class KeySplitter(SplitterBase):
 
                                 new_handle = open(output_filename, open_mode, encoding='utf-8')
                                 state['handle'] = new_handle
-                                open_files_cache[sanitized_value] = state # Add/update cache *after* successful open
-                                if sanitized_value not in written_keys:
-                                    written_keys.add(sanitized_value)
+                                file_cache[sanitized_value] = state # Add/update cache *after* successful open
+                                if sanitized_value not in key_part_indices:
+                                    key_part_indices[sanitized_value] = 0
                             except IOError as e:
                                 self.log.error(f"Failed to open file '{output_filename}' for key '{sanitized_value}': {e}. Skipping item.")
                                 state['handle'] = None # Ensure handle is None on failure
-                                if sanitized_value in open_files_cache: del open_files_cache[sanitized_value]
+                                if sanitized_value in file_cache: del file_cache[sanitized_value]
                                 continue # Skip to next item
                             except Exception as e: # Catch other potential errors like permission issues
                                  self.log.exception(f"Failed to open file '{output_filename}' for key '{sanitized_value}':")
                                  state['handle'] = None
-                                 if sanitized_value in open_files_cache: del open_files_cache[sanitized_value]
+                                 if sanitized_value in file_cache: del file_cache[sanitized_value]
                                  continue
 
                         # Write item
@@ -671,7 +707,7 @@ class KeySplitter(SplitterBase):
                                 # Update state AFTER write
                                 if needs_new_part: # Just started a new part for this item
                                     state['count'] = 1
-                                    state['size'] = base_overhead + item_size
+                                    state['size'] = item_size
                                 else:
                                     state['count'] = potential_new_count
                                     state['size'] = potential_new_size
@@ -681,45 +717,66 @@ class KeySplitter(SplitterBase):
                                     if current_handle: current_handle.close()
                                 except IOError: pass
                                 state['handle'] = None
-                                if sanitized_value in open_files_cache: del open_files_cache[sanitized_value]
+                                if sanitized_value in file_cache: del file_cache[sanitized_value]
                                 continue # Skip this item
                         else:
                             self.log.error(f"Internal Error: Handle invalid for key '{sanitized_value}' before write. Skipping.")
                             continue
 
                     except (TypeError, ValueError) as e:
-                        self.log.error(f"Error processing item {item_count_total} (key value: '{key_value_original}'): {e}. Skipping.")
+                        self.log.error(f"Error processing item {items_processed} (key value: '{key_value_original}'): {e}. Skipping.")
                         continue
                     except MemoryError:
-                        self.log.error(f"Memory error processing item {item_count_total}. Attempting to continue.")
+                        self.log.error(f"Memory error processing item {items_processed}. Attempting to continue.")
                         continue
                     except Exception as e:
-                        self.log.exception(f"Unexpected error processing item {item_count_total} (key: '{key_value_original}'):")
+                        self.log.exception(f"Unexpected error processing item {items_processed} (key: '{key_value_original}'):")
                         continue
 
-            # End of loop
-            if total_items_processed > last_progress_report_item:
-                 self.log.info(f"  Processed {total_items_processed} items total.")
-            self.log.info("Finished processing input.")
+            # End of main processing loop (inside try block)
+            self.log.info("Finished processing input file stream.")
+
+            # Final log messages and return should happen *before* exception handlers
+            if items_written > 0:
+                 self.log.info(f"Key splitting finished successfully.")
+                 self.log.info(f"  Total items read from path: {items_processed}")
+                 self.log.info(f"  Items written to files: {items_written}")
+                 # Add counts for skipped items
+            else:
+                 # Check if items were processed but none written (e.g., all skipped/errors)
+                 if items_processed > 0:
+                     self.log.warning(f"Key splitting finished, but no items were written.")
+                     self.log.info(f"  Total items read from path: {items_processed}")
+                 else:
+                     self.log.info(f"Key splitting finished. No items found at the specified path.")
+
+            tracker.finalize() # Call finalize before returning success
+            # success_flag = True # Moved initialization before try block
 
         except FileNotFoundError:
-            self.log.error(f"Error: Input file '{self.input_file}' not found."); success = False
+            self.log.error(f"Error: Input file '{self.input_file}' not found.")
+            success_flag = False # Set failure flag
         except ijson.JSONError as e:
             line, col = getattr(e, 'lineno', None), getattr(e, 'colno', None)
             line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
-            self.log.error(f"Error parsing JSON{line_col_str}: {e}."); success = False
+            self.log.error(f"Error parsing JSON{line_col_str}: {e}.")
+            success_flag = False
         except (IOError, OSError) as e:
-            self.log.error(f"File system error during key splitting: {e}"); success = False
+            self.log.error(f"File system error during key splitting: {e}")
+            success_flag = False
         except MemoryError:
-            self.log.error("Memory error during key splitting setup or loop."); success = False
+            self.log.error("Memory error during key splitting setup or loop.")
+            success_flag = False
         except Exception as e:
-            self.log.exception("An unexpected error occurred during key splitting:"); success = False
+            self.log.exception("An unexpected error occurred during key splitting:")
+            success_flag = False
         finally:
+            # This block *always* executes, ensuring files are closed
             self.log.info("Closing remaining open files...")
             closed_count = 0
-            keys_to_clear = list(open_files_cache.keys())
+            keys_to_clear = list(file_cache.keys())
             for key in keys_to_clear: # Iterate over keys to allow cache modification
-                 state = open_files_cache.pop(key, None) # Remove from cache
+                 state = file_cache.pop(key, None) # Remove from cache
                  if state:
                      try:
                          handle = state.get('handle')
@@ -731,12 +788,79 @@ class KeySplitter(SplitterBase):
                          self.log.warning(f"Error closing file for key '{key}': {e}")
                      except Exception as e:
                           self.log.warning(f"Unexpected error closing file for key '{key}': {e}")
-            open_files_cache.clear()
+            file_cache.clear()
             self.log.info(f"Closed {closed_count} files during cleanup.")
 
-        if success:
-            self.log.info(f"Splitting complete. Total items processed: {total_items_processed}.")
-        else:
-            self.log.error(f"Splitting failed or terminated early. Items processed: {total_items_processed}.")
+        # Return the success status determined in try/except blocks
+        if not success_flag:
+             log.error("Splitting process failed or terminated early.")
+        return success_flag
 
-        return success 
+    def _get_or_open_file(self, sanitized_key, part_index, file_cache, file_stats):
+        """Gets existing handle from cache or opens a new file part."""
+        # Check cache first (using a combined key? No, handle is enough)
+        # Caller should manage removing from cache if closed.
+
+        # Construct filename
+        # This duplicates logic from split() - needs refactoring maybe
+        part_suffix = f"_part_{part_index:04d}" if part_index > 0 else ""
+        format_args = {
+            'prefix': self.output_prefix, 'type': 'key',
+            'index': sanitized_key, 'part': part_suffix,
+            'ext': self.output_format # Should be jsonl
+        }
+        try:
+            # Use the filename format resolution logic
+            current_format = self.filename_format
+            if not current_format: # Use default if None
+                current_format = "{prefix}_key_{index}{part}.{ext}"
+            elif '{index:04d}' in current_format: # Basic check for wrong format type
+                current_format = "{prefix}_key_{index}{part}.{ext}"
+            # Apply formatting (handle potential :04d for keys)
+            temp_format = current_format.replace("{index:04d}", "{index}")
+            output_filename = temp_format.format(**format_args)
+
+            basename = os.path.basename(output_filename)
+            if not basename or '/' in basename or '\\' in basename:
+                raise ValueError(f"Generated filename '{output_filename}' invalid.")
+
+        except (KeyError, ValueError) as e:
+            self.log.error(f"Error applying filename format '{self.filename_format}': {e}. Using fallback.")
+            fallback_part_suffix = f"_part_{part_index:04d}" if part_index > 0 else ""
+            output_filename = f"{self.output_prefix}_key_{sanitized_key}{fallback_part_suffix}.{self.output_format}"
+        except Exception as e:
+                self.log.error(f"Unexpected error formatting filename: {e}. Using fallback.")
+                fallback_part_suffix = f"_part_{part_index:04d}" if part_index > 0 else ""
+                output_filename = f"{self.output_prefix}_key_{sanitized_key}{fallback_part_suffix}.{self.output_format}"
+
+
+        # Track file before attempting to open
+        self.created_files_set.add(output_filename)
+
+        open_mode = 'w' if part_index == 0 else 'a'
+        self.log.info(f"  Opening file ({open_mode}): {output_filename}")
+        try:
+            output_dir = os.path.dirname(output_filename)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+
+            handle = open(output_filename, open_mode, encoding='utf-8')
+
+            # Initialize stats for the *new* file handle
+            if output_filename not in file_stats:
+                 file_stats[output_filename] = {'count': 0, 'bytes': 0}
+
+            # Add handle to cache (caller should remove if needed)
+            # Note: We might overwrite an existing entry if LRU didn't evict?
+            # Consider if cache key should be (sanitized_key, part_index) ?
+            # Sticking with sanitized_key for now, assuming caller handles part logic.
+            file_cache[sanitized_key] = handle
+
+            return handle, output_filename
+
+        except IOError as e:
+            self.log.error(f"Failed to open file '{output_filename}' for key '{sanitized_key}': {e}. Skipping item.")
+        except Exception as e:
+            self.log.exception(f"Failed to open file '{output_filename}' for key '{sanitized_key}':")
+
+        return None, None # Indicate failure 

@@ -664,7 +664,7 @@ def test_error_invalid_json(temp_output_dir):
         (
             "bad_size_format",
             ["--split-by", "size", "--value", "10XYZ", "--path", "item"],
-            "argument --value: Invalid size format: Invalid numeric value '10XYZ' in size string '10XYZ'."
+            "argument --value: Invalid size format: Invalid size format: '10XYZ'. Use formats like 100, 100KB, 50.5MB, 1GB.."
         ),
         (
             "zero_size",
@@ -689,7 +689,7 @@ def test_error_invalid_json(temp_output_dir):
         (
             "bad_secondary_size",
             ["--split-by", "count", "--value", "10", "--path", "item", "--max-size", "foo"],
-            "argument --max-size: Invalid size format: Invalid numeric value 'FOO' in size string 'foo'.."
+            "argument --max-size: Invalid size format: Invalid size format: 'FOO'. Use formats like 100, 100KB, 50.5MB, 1GB.."
         ),
         (
             "bad_choice_on_missing",

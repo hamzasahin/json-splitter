@@ -158,6 +158,7 @@ def run_interactive_mode():
     args.on_invalid_item = 'warn'
     args.verbose = False
     args.filename_format = None # Will be set later based on split_by
+    args.report_interval = 10000 # Add default for interactive
 
     try:
         print("\n--- 📝 Required Settings ---")
@@ -222,6 +223,15 @@ def run_interactive_mode():
 
             verbose_resp = _prompt_with_validation("🐞 Enable verbose logging?", choices=['y', 'n'], default='n', required=False)
             args.verbose = (verbose_resp.lower() == 'y')
+
+            # Add prompt for report interval
+            args.report_interval = _prompt_with_validation(
+                 "📊 Report progress every N items?",
+                 default=str(args.report_interval), # Use current default
+                 validation_func=_validate_optional_int, required=False
+            )
+            # Ensure it's an int (or None if validation returns None)
+            if args.report_interval is None: args.report_interval = 0 # Treat None as 0 (disabled)
         else:
             # Ensure filename_format gets a default even if optionals skipped
             args.filename_format = "{prefix}_key_{index}{part}.{ext}" if args.split_by == 'key' else "{prefix}_{type}_{index:04d}{part}.{ext}"
@@ -265,7 +275,8 @@ def execute_split(args):
         'max_size': args.max_size, # Pass size string
         'filename_format': args.filename_format,
         'verbose': args.verbose,
-        'created_files_set': created_files
+        'created_files_set': created_files,
+        'report_interval': args.report_interval # Pass report_interval
     }
 
     splitter = None
@@ -372,6 +383,9 @@ def main():
                               "  {ext} (json/jsonl). Default varies by split type.")
     parser.add_argument("-v", "--verbose", action="store_true",
                          help="Enable verbose debug logging.")
+    # Add report interval argument
+    parser.add_argument("--report-interval", type=int, default=10000,
+                         help="How often to report progress (number of items). Set to 0 to disable. Default: 10000.")
 
     # --- Key Splitting Options --- #
     key_group = parser.add_argument_group('Key Splitting Options')
