@@ -1,0 +1,4 @@
+azure-functions>=1.10.0
+azure-storage-blob>=12.10.0
+ijson>=3.1.4
+cachetools>=5.0.0 

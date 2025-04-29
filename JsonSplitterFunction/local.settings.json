@@ -1,0 +1,22 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AZURE_STORAGE_CONNECTION_STRING": "UseDevelopmentStorage=true", 
+    "SPLIT_STRATEGY": "count", 
+    "SPLIT_VALUE": "10000", 
+    "JSON_PATH": "", 
+    "OUTPUT_CONTAINER_NAME": "output", 
+    "OUTPUT_BLOB_PREFIX": "", 
+    "BASE_NAME": "chunk", 
+    "OUTPUT_FORMAT": "json", 
+    "MAX_RECORDS_PER_PART": "", 
+    "MAX_SIZE_PER_PART": "", 
+    "FILENAME_FORMAT": "", 
+    "ON_MISSING_KEY": "group", 
+    "ON_INVALID_ITEM": "warn", 
+    "REPORT_INTERVAL": "10000", 
+    "VERBOSE": "false"
+  }
+} 
