@@ -2,6 +2,7 @@ import json
 import ijson
 import os
 import logging
+import traceback
 from cachetools import LRUCache
 
 from .utils import log, parse_size, sanitize_filename, PROGRESS_REPORT_INTERVAL, ProgressTracker
@@ -341,8 +342,11 @@ class CountSplitter(SplitterBase):
              self.log.error(f"Input file not found: {self.input_file}")
              success_flag = False
         except ijson.common.JSONError as e: # Catches re-raised setup error or other fatal ijson errors
-             # Log with traceback regardless of verbose flag for this specific error
              self.log.exception(f"Fatal JSON error encountered during splitting of '{self.input_file}': {e}")
+             # Also print traceback directly to stderr
+             print("--- Traceback START ---") # Add markers
+             traceback.print_exc()
+             print("--- Traceback END ---")   # Add markers
              success_flag = False
         except (IOError, OSError) as e:
             self.log.error(f"File system error during count splitting: {e}")
@@ -429,8 +433,9 @@ class SizeSplitter(SplitterBase):
                 current_chunk_size_bytes = 0
                 # Rough estimate of overhead: [] for JSON, newlines for JSONL
                 base_overhead = 2 if self.output_format == 'json' else 0
-                # Rough estimate per item: ',' for JSON, newline for JSONL
-                per_item_overhead = 4 if self.output_format == 'json' else 1
+                # Rough estimate per item: ',' newline and indentation for JSON, newline for JSONL
+                # Increased overhead for JSON to better account for indentation
+                per_item_overhead = 10 if self.output_format == 'json' else 1
                 current_chunk_size_bytes = base_overhead # Start with overhead
 
                 # Iterate using enumerate for an overall count
@@ -444,8 +449,8 @@ class SizeSplitter(SplitterBase):
                         item_size = 0
                         try:
                             # Serialize item to estimate size
-                            # Using separators=(',', ':') for slightly smaller size, closer to file size
-                            item_str = json.dumps(item, ensure_ascii=False, separators=(',', ':'))
+                            # REMOVED separators=(',', ':') for a more realistic (less compact) size estimate
+                            item_str = json.dumps(item, ensure_ascii=False)
                             item_bytes = item_str.encode('utf-8')
                             item_size = len(item_bytes)
                         except TypeError as te:
@@ -453,29 +458,30 @@ class SizeSplitter(SplitterBase):
                             item_size = 0
 
                         # Determine if adding this item exceeds limits (before adding)
-                        # Need current chunk size + item size + potential overhead
                         potential_next_size = current_chunk_size_bytes + item_size + (per_item_overhead if chunk else 0)
-                        # Check primary size limit (only if chunk > 0 to avoid splitting on first item)
                         exceeds_primary_size = len(chunk) > 0 and potential_next_size > self.size
-                        # Check secondary record limit
                         exceeds_secondary_records = self.secondary_record_limit and (len(chunk) + 1) > self.secondary_record_limit
 
                         # Split if necessary *before* adding the current item
                         if exceeds_primary_size or exceeds_secondary_records:
-                            if chunk: # Only write if there's something in the current chunk
+                            # **** MODIFIED CONDITION TO AVOID TINY FILES ****
+                            # Only write the previous chunk if it already has more than one item.
+                            # Otherwise, allow the current item to be added, exceeding the limit slightly.
+                            if len(chunk) > 1:
                                 reason = "size limit" if exceeds_primary_size else "record limit"
                                 self.log.debug(f"Writing chunk {chunk_index} due to {reason} ({len(chunk)} items, ~{current_chunk_size_bytes / (1024*1024):.2f} MB)...")
-                                self._write_chunk(chunk_index, chunk, split_type='chunk') # Use split_type='chunk'
+                                self._write_chunk(chunk_index, chunk, split_type='chunk')
                                 chunk = []
                                 current_chunk_size_bytes = base_overhead # Reset size
                                 chunk_index += 1
-                            else:
-                                # This happens if a single item exceeds the size limit and chunk is empty
-                                self.log.warning(f"Item ~#{item_count_total_overall} alone (size ~{item_size / (1024*1024):.2f} MB) may exceed the target chunk size of {self.size / (1024*1024):.2f} MB. Writing it to its own file.")
-                                # The item will be added below and written immediately in the next check or at the end
-                                pass
+                            elif len(chunk) == 1:
+                                # If chunk has only 1 item and adding next exceeds limit, DON'T write.
+                                # Allow the item to be added below, creating an oversized chunk > target size.
+                                reason = "size limit" if exceeds_primary_size else "record limit"
+                                self.log.debug(f"Chunk {chunk_index} has 1 item. Adding next item would exceed {reason}. Allowing overshoot to avoid tiny chunk.")
+                            # else: chunk is empty, do nothing here (will be handled by single large item check below if needed)
 
-                        # Add the current item to the (potentially new) chunk
+                        # Add the current item to the (potentially new or existing) chunk
                         chunk.append(item)
                         # Update size: add item size and overhead if it's not the first item
                         current_chunk_size_bytes += item_size + (per_item_overhead if len(chunk) > 1 else 0)
@@ -483,21 +489,19 @@ class SizeSplitter(SplitterBase):
                         if len(chunk) == 1:
                             current_chunk_size_bytes = base_overhead + item_size
 
-                        # Special case: If the *first* item added *also* hits the secondary record limit (limit is 1)
-                        # Or if a single large item was added and needs immediate write
-                        if self.secondary_record_limit == 1 and len(chunk) == 1:
-                             self.log.debug(f"Writing chunk {chunk_index} due to record limit=1.")
-                             self._write_chunk(chunk_index, chunk, split_type='chunk')
-                             chunk = []
-                             current_chunk_size_bytes = base_overhead
-                             chunk_index += 1
-                        elif exceeds_primary_size and len(chunk) == 1: # Handle single large item write
-                             self.log.debug(f"Writing chunk {chunk_index} containing single large item.")
-                             self._write_chunk(chunk_index, chunk, split_type='chunk')
-                             chunk = []
-                             current_chunk_size_bytes = base_overhead
-                             chunk_index += 1
+                        # Special case: Handle single large item OR secondary limit of 1
+                        # If a single item is added and it ALONE exceeds the primary size limit, write it immediately.
+                        # Also, if secondary record limit is 1, write after adding the first item.
+                        if len(chunk) == 1 and (current_chunk_size_bytes > self.size or self.secondary_record_limit == 1):
+                             if current_chunk_size_bytes > self.size:
+                                 self.log.warning(f"Single item (~{current_chunk_size_bytes / (1024*1024):.2f} MB) exceeds target size limit ({self.size / (1024*1024):.2f} MB). Writing to chunk {chunk_index}.")
+                             elif self.secondary_record_limit == 1:
+                                 self.log.debug(f"Writing chunk {chunk_index} due to secondary record limit=1.")
 
+                             self._write_chunk(chunk_index, chunk, split_type='chunk')
+                             chunk = []
+                             current_chunk_size_bytes = base_overhead
+                             chunk_index += 1
 
                     except ijson.common.JSONError as e:
                         items_skipped += 1
@@ -517,8 +521,11 @@ class SizeSplitter(SplitterBase):
             self.log.error(f"Error: Input file '{self.input_file}' not found.")
             success_flag = False
         except ijson.common.JSONError as e: # Catches re-raised setup error or other fatal ijson errors
-            # Log with traceback regardless of verbose flag for this specific error
             self.log.exception(f"Fatal JSON error encountered during splitting of '{self.input_file}': {e}")
+            # Also print traceback directly to stderr
+            print("--- Traceback START ---") # Add markers
+            traceback.print_exc()
+            print("--- Traceback END ---")   # Add markers
             success_flag = False
         except (IOError, OSError) as e:
             self.log.error(f"File system error during size splitting: {e}")
@@ -771,8 +778,11 @@ class KeySplitter(SplitterBase):
             self.log.error(f"Error: Input file '{self.input_file}' not found.")
             success_flag = False
         except ijson.common.JSONError as e: # Catches re-raised setup error or other fatal ijson errors
-            # Log with traceback regardless of verbose flag for this specific error
             self.log.exception(f"Fatal JSON error encountered during splitting of '{self.input_file}': {e}")
+            # Also print traceback directly to stderr
+            print("--- Traceback START ---") # Add markers
+            traceback.print_exc()
+            print("--- Traceback END ---")   # Add markers
             success_flag = False
         except (IOError, OSError) as e:
             self.log.error(f"File system error during key splitting: {e}")
