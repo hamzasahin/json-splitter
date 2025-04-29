@@ -225,6 +225,7 @@ class CountSplitter(SplitterBase):
             # Initialize Progress Tracker
             tracker = ProgressTracker(logger=self.log, report_interval=self._report_interval)
 
+            self.log.debug("Attempting to open and process file...")
             with open(self.input_file, 'rb') as f:
                 items_iterator = None # Initialize to None before try block
                 try:
@@ -333,6 +334,7 @@ class CountSplitter(SplitterBase):
                      if items_in_primary_chunk > 0 or split_by_max_records_only:
                          self._write_chunk(primary_chunk_index, chunk, part_index=part_file_index, split_type='chunk')
 
+            self.log.debug("Finished processing items within file context.")
             success_flag = True # If we reached here without fatal errors
 
         except FileNotFoundError:
@@ -403,7 +405,7 @@ class SizeSplitter(SplitterBase):
 
         try:
             tracker = ProgressTracker(logger=self.log, report_interval=self._report_interval)
-
+            self.log.debug("Attempting to open and process file...")
             with open(self.input_file, 'rb') as f:
                 items_iterator = None # Initialize to None
                 try:
@@ -508,6 +510,7 @@ class SizeSplitter(SplitterBase):
                      self.log.debug(f"Writing final chunk {chunk_index} ({len(chunk)} items, ~{current_chunk_size_bytes / (1024*1024):.2f} MB)...")
                      self._write_chunk(chunk_index, chunk, split_type='chunk')
 
+            self.log.debug("Finished processing items within file context.")
             success_flag = True # Reached end without fatal error
 
         except FileNotFoundError:
@@ -604,7 +607,7 @@ class KeySplitter(SplitterBase):
 
         try:
             tracker = ProgressTracker(logger=self.log, report_interval=self._report_interval)
-
+            self.log.debug("Attempting to open and process file...")
             with open(self.input_file, 'rb') as f:
                 items_iterator = None # Initialize to None
                 try:
@@ -760,6 +763,7 @@ class KeySplitter(SplitterBase):
 
 
             # End of main processing loop (inside try block)
+            self.log.debug("Finished processing items within file context.")
             self.log.info("Finished processing input file stream.")
             success_flag = True # If we reach here, processing completed without fatal policy errors
 
