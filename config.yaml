@@ -1,7 +1,7 @@
 input_file: /Users/user/json-splitter/tests/data/json-40mb.json
 split_by: size
-value: 15MB
-path: item # Path to the array of user objects
+value: 10MB
+path: data.item # Path to the array of user objects
 
 # --- Common Optional Settings --- #
 

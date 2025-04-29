@@ -348,39 +348,40 @@ def execute_split(args):
             log.error(f"Internal error: Unknown split_by type '{args.split_by}'")
             return False
 
-        # --- Execute Splitting --- #
-        if splitter:
-            success = splitter.split()
-        else:
-             # If splitter instantiation failed (e.g., bad value)
-             log.error("Failed to initialize splitter. Check arguments.")
-             success = False # Already false, but explicit
+        # Pass the set to the splitter instance
+        splitter.created_files_set = created_files
 
-    except (ValueError, TypeError) as e:
-        # Catch errors during splitter initialization (e.g., invalid count/size/key)
-        log.error(f"Initialization error: {e}")
-        success = False
+        success = splitter.split() # Execute the split
+
+    except (ValueError, TypeError, KeyError, FileNotFoundError, MemoryError, ijson.common.JSONError) as e:
+        log.error(f"Splitting pre-check or setup failed: {e}")
+        success = False # Ensure success is false
     except Exception as e:
-        log.exception(f"An unexpected error occurred during splitting setup: {e}")
-        success = False
+        log.exception(f"An unexpected error occurred before splitting could start: {e}")
+        success = False # Ensure success is false
 
-    # --- Cleanup on Failure --- #
+    # Handle result - REMOVED CLEANUP LOGIC
     if not success:
-        log.warning("Splitting process failed. Attempting cleanup...")
-        cleaned_count = 0
+        # Log failure, but do not attempt cleanup
+        log.error("Splitting process reported failure.") # Changed level to ERROR
+        # The detailed error should have been logged within the splitter's method
+
+        # Cleanup logic removed as per user request
+        # log.warning("Splitting process failed. Attempting cleanup...")
+        # cleaned_count = 0
         # Use the set passed to the splitter instance
-        files_to_check = splitter.created_files_set if splitter else created_files
-        for filename in files_to_check:
-            try:
-                if os.path.exists(filename):
-                    os.remove(filename)
-                    log.debug(f"  Removed potentially partial file: {filename}")
-                    cleaned_count += 1
-            except OSError as rm_err:
-                log.warning(f"  Could not remove partial file '{filename}': {rm_err}")
-            except Exception as E:
-                 log.warning(f"  Unexpected error removing '{filename}': {E}")
-        log.warning(f"Cleaned up {cleaned_count} file(s).")
+        # files_to_check = splitter.created_files_set if splitter else created_files
+        # for filename in files_to_check:
+        #     try:
+        #         if os.path.exists(filename):
+        #             os.remove(filename)
+        #             log.debug(f"  Removed potentially partial file: {filename}")
+        #             cleaned_count += 1
+        #     except OSError as rm_err:
+        #         log.warning(f"  Could not remove partial file '{filename}': {rm_err}")
+        #     except Exception as E:
+        #          log.warning(f"  Unexpected error removing '{filename}': {E}")
+        # log.warning(f"Cleaned up {cleaned_count} file(s).")
 
     if success:
         log.info("Splitting process completed successfully.")
