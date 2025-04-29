@@ -144,4 +144,4 @@ Found a bug or have an idea? Feel free to open an Issue or Pull Request!
 
 ## 📜 License
 
-This project is licensed under the MIT License. (You should add a `LICENSE` file to your repository containing the MIT License text). 
+This project is licensed under the [MIT License](LICENSE). 
