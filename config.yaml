@@ -1,4 +1,4 @@
-input_file: /path/to/input/user_data.json
+input_file: /Users/user/json-splitter/tests/data/json-40mb.json
 split_by: size
 value: 15MB
 path: item # Path to the array of user objects
