@@ -339,18 +339,15 @@ class CountSplitter(SplitterBase):
              self.log.error(f"Input file not found: {self.input_file}")
              success_flag = False
         except ijson.common.JSONError as e: # Catches re-raised setup error or other fatal ijson errors
-             # Error message logged during setup failure or here if another fatal error
-             # Ensure a generic message if not logged previously
-             if "Fatal JSON error setting up iterator" not in str(e): # Avoid duplicate logging somewhat crudely
-                 line, col = getattr(e, 'lineno', None), getattr(e, 'colno', None)
-                 line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
-                 self.log.error(f"Fatal JSON error processing '{self.input_file}'{line_col_str}: {e}")
+             # Log with traceback regardless of verbose flag for this specific error
+             self.log.exception(f"Fatal JSON error encountered during splitting of '{self.input_file}': {e}")
              success_flag = False
         except (IOError, OSError) as e:
             self.log.error(f"File system error during count splitting: {e}")
             success_flag = False
         except Exception as e:
-             self.log.error(f"An unexpected error occurred during splitting: {e}", exc_info=self.verbose) # Add exc_info for debug
+             # Log other unexpected errors with traceback if verbose
+             self.log.error(f"An unexpected error occurred during splitting: {e}", exc_info=self.verbose)
              success_flag = False
         finally:
              # Report skipped items
@@ -516,10 +513,9 @@ class SizeSplitter(SplitterBase):
         except FileNotFoundError:
             self.log.error(f"Error: Input file '{self.input_file}' not found.")
             success_flag = False
-        except ijson.common.JSONError as e:
-            line, col = getattr(e, 'lineno', None), getattr(e, 'colno', None)
-            line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
-            self.log.error(f"Fatal JSON error processing '{self.input_file}' near beginning or during setup{line_col_str}: {e}")
+        except ijson.common.JSONError as e: # Catches re-raised setup error or other fatal ijson errors
+            # Log with traceback regardless of verbose flag for this specific error
+            self.log.exception(f"Fatal JSON error encountered during splitting of '{self.input_file}': {e}")
             success_flag = False
         except (IOError, OSError) as e:
             self.log.error(f"File system error during size splitting: {e}")
@@ -528,7 +524,8 @@ class SizeSplitter(SplitterBase):
             self.log.error("Memory error during size splitting.")
             success_flag = False
         except Exception as e:
-            self.log.exception(f"An unexpected error occurred during size splitting: {e}")
+            # Log other unexpected errors with traceback if verbose
+            self.log.exception(f"An unexpected error occurred during size splitting: {e}", exc_info=self.verbose)
             success_flag = False
         finally:
             if items_skipped > 0:
@@ -769,10 +766,9 @@ class KeySplitter(SplitterBase):
         except FileNotFoundError:
             self.log.error(f"Error: Input file '{self.input_file}' not found.")
             success_flag = False
-        except ijson.common.JSONError as e:
-            line, col = getattr(e, 'lineno', None), getattr(e, 'colno', None)
-            line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
-            self.log.error(f"Fatal JSON error processing '{self.input_file}' near beginning or during setup{line_col_str}: {e}")
+        except ijson.common.JSONError as e: # Catches re-raised setup error or other fatal ijson errors
+            # Log with traceback regardless of verbose flag for this specific error
+            self.log.exception(f"Fatal JSON error encountered during splitting of '{self.input_file}': {e}")
             success_flag = False
         except (IOError, OSError) as e:
             self.log.error(f"File system error during key splitting: {e}")
