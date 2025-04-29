@@ -508,7 +508,7 @@ class KeySplitter(SplitterBase):
         self.file_format_extension = 'jsonl'
         # Override default filename format if not provided or unsuitable
         if not self.filename_format or '{index:04d}' in self.filename_format:
-             default_key_format = "{prefix}_key_{index}{part}.{ext}"
+             default_key_format = "{base_name}_key_{index}{part}.{ext}"
              if self.filename_format and self.filename_format != default_key_format:
                   self.log.debug(f"Using default filename format for key splitting: '{default_key_format}'")
              self.filename_format = default_key_format
@@ -564,183 +564,98 @@ class KeySplitter(SplitterBase):
                         sanitized_value = None
                         should_skip_item = False
 
+                        # --- Determine Key/Grouping --- #
                         if key_value_original is None:
                             if self.on_missing_key == 'error':
                                 self.log.error(f"Key '{self.key_name}' not found in item {items_processed}.")
-                                # Set failure flag and break loop on error
-                                success_flag = False
-                                break
+                                success_flag = False; break
                             elif self.on_missing_key == 'skip':
                                 self.log.debug(f"Skipping item {items_processed}: Key '{self.key_name}' missing.")
-                                should_skip_item = True
+                                items_skipped_missing_key += 1; continue
                             else: # group
                                 sanitized_value = "__missing_key__"
-                                self.log.debug(f"Item {items_processed}: Key missing, grouping as '{sanitized_value}'.")
                         elif isinstance(key_value_original, (dict, list)):
                             complex_type = type(key_value_original).__name__
                             sanitized_value = f"__complex_type_{sanitize_filename(complex_type)}__"
                             self.log.warning(f"Key '{self.key_name}' in item {items_processed} is complex ({complex_type}). Grouping as '{sanitized_value}'.")
                         else:
                             sanitized_value = sanitize_filename(key_value_original)
-                            self.log.debug(f"Item {items_processed}: Key '{key_value_original}' sanitized to '{sanitized_value}'.")
 
-                        if should_skip_item: continue
-                        if sanitized_value is None: # Should not happen normally
+                        if sanitized_value is None: # Should not happen if logic above is correct
                              self.log.error(f"Internal error: Sanitized value is None for item {items_processed}. Skipping.")
                              continue
 
-                        # LRU Cache Logic
-                        state = None
-                        if sanitized_value in open_files_cache:
-                            state = open_files_cache[sanitized_value]
-                            self.log.debug(f"Cache hit for key '{sanitized_value}'.")
-                        else:
-                            self.log.debug(f"Cache miss for key '{sanitized_value}'.")
-                            if len(open_files_cache) >= MAX_OPEN_FILES_KEY_SPLIT:
-                                evicted_key, evicted_state = open_files_cache.popitem()
-                                self.log.debug(f"Cache full. Evicting state for key '{evicted_key}'.")
-                                try:
-                                    handle = evicted_state.get('handle')
-                                    if handle and not handle.closed:
-                                        self.log.debug(f"Closing evicted file handle for key '{evicted_key}', part {evicted_state.get('part', '?')}.")
-                                        handle.close()
-                                except IOError as e:
-                                    self.log.warning(f"Error closing evicted file for key '{evicted_key}': {e}")
-
-                            mode = 'a' if sanitized_value in file_stats else 'w'
-                            self.log.debug(f"Key '{sanitized_value}' mode: '{mode}'.")
-                            state = {'handle': None, 'count': 0, 'size': 0, 'part': 0, 'mode': mode}
-                            # Don't add to file_stats until open succeeds
-
-                        # Serialize item
+                        # --- Serialize Item (needed for size checks and writing) --- #
                         item_size = 0
                         item_str = None
                         try:
                             item_str = json.dumps(item)
                             if self.max_size_bytes:
                                 item_bytes = item_str.encode('utf-8')
-                                item_size = len(item_bytes)
+                                item_size = len(item_bytes) + 1 # +1 for newline
                         except TypeError as e:
                             self.log.warning(f"Could not serialize item {items_processed} (key: {sanitized_value}): {e}. Skipping.")
                             continue
 
-                        # Check if split is needed BEFORE adding
-                        potential_new_count = state['count'] + 1
-                        potential_new_size = state['size'] + item_size + 1
+                        # --- Check Secondary Limits and Determine File Part --- #
+                        current_state = file_stats.get(sanitized_value, {'count': 0, 'size': 0, 'part': 0})
                         needs_new_part = False
-                        split_reason = ""
-
-                        if state['count'] > 0: # Only split if the part already has items
-                            if self.max_records and potential_new_count > self.max_records:
+                        if current_state['count'] > 0: # Only consider splitting if part has items
+                            if self.max_records and current_state['count'] >= self.max_records:
                                 needs_new_part = True
                                 split_reason = f"record limit ({self.max_records})"
-                            elif self.max_size_bytes and potential_new_size > self.max_size_bytes:
+                            elif self.max_size_bytes and (current_state['size'] + item_size) > self.max_size_bytes:
                                 needs_new_part = True
                                 split_reason = f"size limit (~{self.max_size_bytes / (1024*1024):.2f}MB)"
 
-                        current_handle = state.get('handle')
                         if needs_new_part:
-                            self.log.debug(f"Split needed for key '{sanitized_value}' part {state['part']} due to {split_reason}. Closing file.")
+                            self.log.debug(f"Split needed for key '{sanitized_value}' part {current_state['part']} due to {split_reason}. Starting new part.")
+                            # Close the *previous* part's handle if it's in the cache
                             try:
-                                if current_handle and not current_handle.closed:
-                                    current_handle.close()
-                            except IOError as e:
-                                self.log.warning(f"Error closing file for key '{sanitized_value}', part {state['part']}: {e}")
-                            state['part'] += 1
-                            state['count'] = 0
-                            state['size'] = 0
-                            state['handle'] = None # Mark handle as needing reopening
-                            state['mode'] = 'a' # Subsequent parts always append
-                            self.log.debug(f"Starting new part {state['part']} for key '{sanitized_value}'.")
-
-                        # Open file if needed
-                        if state.get('handle') is None or state['handle'].closed:
-                            # --- Refactored: Let _write_chunk handle filename generation and opening ---
-                            # Determine mode for the first write to this key/part combination
-                            open_mode = state.get('mode', 'a') # Should be 'w' for part 0 of a new key
-
-                            # Attempt to open the file via _write_chunk logic indirectly
-                            # We need a mechanism to open/get the handle without writing the item yet.
-                            # OR: Simplify - just open directly here, remove complex _write_chunk call for filename
-
-                            part_suffix = f"_part_{state['part']:04d}" if state['part'] > 0 else ""
-                            format_args = {
-                                'prefix': self.base_name, 'type': 'key',
-                                'index': sanitized_value, 'part': part_suffix,
-                                'ext': self.file_format_extension
-                            }
-                            try:
-                                # Use the filename format resolution logic from _write_chunk
-                                current_format = self.filename_format
-                                if not current_format: # Use default if None
-                                    current_format = "{prefix}_key_{index}{part}.{ext}"
-                                elif '{index:04d}' in current_format: # Basic check for wrong format type
-                                    current_format = "{prefix}_key_{index}{part}.{ext}"
-                                # Apply formatting (handle potential :04d for keys)
-                                temp_format = current_format.replace("{index:04d}", "{index}")
-                                output_filename = temp_format.format(**format_args)
-
-                                basename = os.path.basename(output_filename)
-                                if not basename or '/' in basename or '\\' in basename:
-                                    raise ValueError(f"Generated filename '{output_filename}' invalid.")
-
-                            except (KeyError, ValueError) as e:
-                                self.log.error(f"Error applying filename format '{self.filename_format}': {e}. Using fallback.")
-                                fallback_part_suffix = f"_part_{state['part']:04d}" if state['part'] > 0 else ""
-                                output_filename = f"{self.base_name}_key_{sanitized_value}{fallback_part_suffix}.{self.file_format_extension}"
+                                old_handle, old_file_path = self._get_or_open_file(sanitized_value, current_state['part'], open_files_cache, file_stats, open_if_missing=False)
+                                if old_file_path and old_file_path in open_files_cache:
+                                    evicted_handle = open_files_cache.pop(old_file_path)
+                                    if evicted_handle and not evicted_handle.closed:
+                                        evicted_handle.close()
+                                        self.log.debug(f"Closed handle for previous part: {old_file_path}")
                             except Exception as e:
-                                 self.log.error(f"Unexpected error formatting filename: {e}. Using fallback.")
-                                 fallback_part_suffix = f"_part_{state['part']:04d}" if state['part'] > 0 else ""
-                                 output_filename = f"{self.base_name}_key_{sanitized_value}{fallback_part_suffix}.{self.file_format_extension}"
+                                 self.log.warning(f"Could not close previous file part handle for {sanitized_value}: {e}")
 
-                            # Track file before attempting to open
-                            self.created_files_set.add(output_filename)
+                            # Increment part index and reset stats for the new part
+                            current_state['part'] += 1
+                            current_state['count'] = 0
+                            current_state['size'] = 0
+                            file_stats[sanitized_value] = current_state # Update stats with new part info
 
-                            self.log.info(f"  Opening file ({open_mode}): {output_filename}")
-                            try:
-                                output_dir = os.path.dirname(output_filename)
-                                if output_dir:
-                                    os.makedirs(output_dir, exist_ok=True)
+                        # --- Get File Handle for Current Part --- #
+                        current_part_index = current_state['part']
+                        current_handle, current_file_path = self._get_or_open_file(
+                            sanitized_value,
+                            current_part_index,
+                            open_files_cache,
+                            file_stats
+                        )
 
-                                new_handle = open(output_filename, open_mode, encoding='utf-8')
-                                state['handle'] = new_handle
-                                open_files_cache[sanitized_value] = state # Add/update cache *after* successful open
-                                if sanitized_value not in file_stats:
-                                    file_stats[sanitized_value] = {'count': 0, 'bytes': 0}
-                            except IOError as e:
-                                self.log.error(f"Failed to open file '{output_filename}' for key '{sanitized_value}': {e}. Skipping item.")
-                                state['handle'] = None # Ensure handle is None on failure
-                                if sanitized_value in open_files_cache: del open_files_cache[sanitized_value]
-                                continue # Skip to next item
-                            except Exception as e: # Catch other potential errors like permission issues
-                                 self.log.exception(f"Failed to open file '{output_filename}' for key '{sanitized_value}':")
-                                 state['handle'] = None
-                                 if sanitized_value in open_files_cache: del open_files_cache[sanitized_value]
-                                 continue
+                        if current_handle is None or current_handle.closed:
+                             self.log.error(f"Failed to get valid file handle for key '{sanitized_value}', part {current_part_index}. Skipping item {items_processed}.")
+                             continue
 
-                        # Write item
-                        current_handle = state.get('handle') # Re-get handle
-                        if current_handle and not current_handle.closed:
-                            try:
-                                current_handle.write(item_str + '\n')
-                                # Update state AFTER write
-                                if needs_new_part: # Just started a new part for this item
-                                    state['count'] = 1
-                                    state['size'] = item_size
-                                else:
-                                    state['count'] = potential_new_count
-                                    state['size'] = potential_new_size
-                            except IOError as e:
-                                self.log.error(f"Failed to write to file for key '{sanitized_value}': {e}. Closing handle.")
-                                try:
-                                    if current_handle: current_handle.close()
-                                except IOError: pass
-                                state['handle'] = None
-                                if sanitized_value in open_files_cache: del open_files_cache[sanitized_value]
-                                continue # Skip this item
-                        else:
-                            self.log.error(f"Internal Error: Handle invalid for key '{sanitized_value}' before write. Skipping.")
-                            continue
+                        # --- Write Item --- #
+                        try:
+                            current_handle.write(item_str + '\n')
+                            items_written += 1
+                            # Update state AFTER successful write
+                            current_state['count'] += 1
+                            current_state['size'] += item_size
+                            file_stats[sanitized_value] = current_state # Store updated stats
+                        except IOError as e:
+                            self.log.error(f"Failed to write to file '{current_file_path}' for key '{sanitized_value}': {e}. Closing handle.")
+                            try: current_handle.close() # Attempt to close
+                            except: pass
+                            # Remove from cache to force reopen on next attempt
+                            if current_file_path in open_files_cache: open_files_cache.pop(current_file_path)
+                            state['handle'] = None # Mark state as needing reopen (if state is used elsewhere)
+                            continue # Skip this item
 
                     except (TypeError, ValueError) as e:
                         self.log.error(f"Error processing item {items_processed} (key value: '{key_value_original}'): {e}. Skipping.")
@@ -760,7 +675,8 @@ class KeySplitter(SplitterBase):
                  self.log.info(f"Key splitting finished successfully.")
                  self.log.info(f"  Total items read from path: {items_processed}")
                  self.log.info(f"  Items written to files: {items_written}")
-                 # Add counts for skipped items
+                 if items_skipped_missing_key: self.log.info(f"  Items skipped (missing key): {items_skipped_missing_key}")
+                 if items_skipped_invalid: self.log.info(f"  Items skipped (invalid type): {items_skipped_invalid}")
             else:
                  # Check if items were processed but none written (e.g., all skipped/errors)
                  if items_processed > 0:
@@ -815,9 +731,10 @@ class KeySplitter(SplitterBase):
              log.error("Splitting process failed or terminated early.")
         return success_flag
 
-    def _get_or_open_file(self, sanitized_key, part_index, file_cache, file_stats):
-        """Gets file handle from cache or opens a new one. Handles filename formatting.
-           Returns (file_handle, full_file_path) or (None, None) on error.
+    def _get_or_open_file(self, sanitized_key, part_index, file_cache, file_stats, open_if_missing=True):
+        """Gets file handle from cache or opens a new one if open_if_missing is True.
+           Handles filename formatting.
+           Returns (file_handle, full_file_path) or (None, None) on error or if not opening.
         """
         # Generate the base filename using the format string
         part_suffix = f"_part_{part_index:04d}" if part_index > 0 else ""
@@ -856,12 +773,14 @@ class KeySplitter(SplitterBase):
         except (KeyError, ValueError) as e:
             self.log.error(f"Error applying filename format '{self.filename_format or 'default'}' for key '{sanitized_key}': {e}. Using fallback.")
             fallback_part_suffix = f"_part_{part_index:04d}" if part_index > 0 else ""
+            # Corrected fallback to use self.base_name directly
             fallback_basename = f"{self.base_name}_key_{sanitized_key}{fallback_part_suffix}.{self.file_format_extension}"
             full_file_path = os.path.join(self.output_dir, fallback_basename)
             self.log.warning(f"Using fallback filename: {full_file_path}")
         except Exception as e:
                 self.log.error(f"Unexpected error formatting filename for key '{sanitized_key}': {e}. Using fallback.")
                 fallback_part_suffix = f"_part_{part_index:04d}" if part_index > 0 else ""
+                # Corrected fallback to use self.base_name directly
                 fallback_basename = f"{self.base_name}_key_{sanitized_key}{fallback_part_suffix}.{self.file_format_extension}"
                 full_file_path = os.path.join(self.output_dir, fallback_basename)
                 self.log.warning(f"Using fallback filename: {full_file_path}")

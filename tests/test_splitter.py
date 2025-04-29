@@ -90,17 +90,20 @@ def load_jsonl_output(filepath):
 
 def test_split_by_count_basic(temp_output_dir):
     """Test basic splitting by count into JSON array files."""
-    output_prefix = str(temp_output_dir / "count_basic")
+    output_dir = temp_output_dir
+    base_name = "count_basic"
     run_splitter([
-        SAMPLE_ARRAY_FILE,
-        output_prefix,
+        str(SAMPLE_ARRAY_FILE),
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "count",
         "--value", "3",
         "--path", "item"
     ])
 
     # Check files created (using the updated naming convention)
-    files = sorted(glob.glob(f"{output_prefix}_chunk_*.json"))
+    file_pattern = os.path.join(output_dir, f"{base_name}_chunk_*.json")
+    files = sorted(glob.glob(file_pattern))
     assert len(files) == 3, f"Expected 3 files, found {len(files)}: {files}"
 
     # Check content
@@ -121,17 +124,19 @@ def test_split_by_count_basic(temp_output_dir):
 
 def test_split_by_count_jsonl(temp_output_dir):
     """Test splitting by count into JSONL files."""
-    output_prefix = str(temp_output_dir / "count_jsonl")
+    output_dir = temp_output_dir
+    base_name = "count_jsonl"
     run_splitter([
-        SAMPLE_ARRAY_FILE,
-        output_prefix,
+        str(SAMPLE_ARRAY_FILE),
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "count",
         "--value", "2",
         "--path", "item",
         "--output-format", "jsonl"
     ])
 
-    files = sorted(glob.glob(f"{output_prefix}_chunk_*.jsonl"))
+    files = sorted(glob.glob(os.path.join(output_dir, f"{base_name}_chunk_*.jsonl")))
     assert len(files) == 4, f"Expected 4 files, found {len(files)}: {files}"
 
     # Check content of first and last
@@ -148,7 +153,8 @@ def test_split_by_count_jsonl(temp_output_dir):
 @pytest.mark.skip(reason="Requires a large sample JSON file which is not present")
 def test_split_by_size_basic(temp_output_dir):
     """Test splitting by size into JSON array files using a larger file."""
-    output_prefix = str(temp_output_dir / "size_basic")
+    output_dir = temp_output_dir
+    base_name = "size_basic"
     split_size_mb = 10
     split_size_bytes = split_size_mb * 1024 * 1024
     # Rough expectation: 40MB file split into 10MB chunks -> 4 files
@@ -157,14 +163,15 @@ def test_split_by_size_basic(temp_output_dir):
     expected_max_files = 5
 
     run_splitter([
-        LARGE_JSON_FILE,
-        output_prefix,
+        str(LARGE_JSON_FILE),
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "size",
         "--value", f"{split_size_mb}MB",
         "--path", "item" # Assuming the large file is also an array at the root
     ])
 
-    files = sorted(glob.glob(f"{output_prefix}_chunk_*.json"))
+    files = sorted(glob.glob(os.path.join(output_dir, f"{base_name}_chunk_*.json")))
     assert expected_min_files <= len(files) <= expected_max_files, (
         f"Expected {expected_min_files}-{expected_max_files} files for ~{split_size_mb}MB split, found {len(files)}"
     )
@@ -192,7 +199,8 @@ def test_split_by_size_basic(temp_output_dir):
 @pytest.mark.skip(reason="Requires a large sample JSON file which is not present")
 def test_split_by_size_jsonl(temp_output_dir):
     """Test splitting by size into JSONL files using a larger file."""
-    output_prefix = str(temp_output_dir / "size_jsonl")
+    output_dir = temp_output_dir
+    base_name = "size_jsonl"
     split_size_mb = 8 # Use a slightly different size
     split_size_bytes = split_size_mb * 1024 * 1024
     # Rough expectation: 40MB file / 8MB chunks -> 5 files
@@ -200,15 +208,16 @@ def test_split_by_size_jsonl(temp_output_dir):
     expected_max_files = 6
 
     run_splitter([
-        LARGE_JSON_FILE,
-        output_prefix,
+        str(LARGE_JSON_FILE),
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "size",
         "--value", f"{split_size_mb}MB",
         "--path", "item", # Assuming the large file is also an array at the root
         "--output-format", "jsonl"
     ])
 
-    files = sorted(glob.glob(f"{output_prefix}_chunk_*.jsonl"))
+    files = sorted(glob.glob(os.path.join(output_dir, f"{base_name}_chunk_*.jsonl")))
     assert expected_min_files <= len(files) <= expected_max_files, (
         f"Expected {expected_min_files}-{expected_max_files} files for ~{split_size_mb}MB split, found {len(files)}"
     )
@@ -236,11 +245,13 @@ def test_split_by_size_jsonl(temp_output_dir):
 
 def test_split_by_key_basic(temp_output_dir):
     """Test basic splitting by key into JSONL files."""
-    output_prefix = str(temp_output_dir / "key_basic")
+    output_dir = temp_output_dir
+    base_name = "key_basic"
     key_name = "category"
     run_splitter([
-        SAMPLE_ARRAY_FILE, # Contains items with 'category': 'A' or 'B'
-        output_prefix,
+        str(SAMPLE_ARRAY_FILE), # Contains items with 'category': 'A' or 'B'
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "key",
         "--value", key_name,
         "--path", "item",
@@ -248,10 +259,10 @@ def test_split_by_key_basic(temp_output_dir):
     ])
 
     # Expect files named based on key values (A and B)
-    file_a = f"{output_prefix}_key_A.jsonl"
-    file_b = f"{output_prefix}_key_B.jsonl"
-    file_c = f"{output_prefix}_key_C.jsonl"
-    file_missing = f"{output_prefix}_key___missing_key__.jsonl"
+    file_a = output_dir / f"{base_name}_key_A.jsonl"
+    file_b = output_dir / f"{base_name}_key_B.jsonl"
+    file_c = output_dir / f"{base_name}_key_C.jsonl"
+    file_missing = output_dir / f"{base_name}_key___missing_key__.jsonl"
 
     assert os.path.exists(file_a), f"Expected output file {file_a} not found."
     assert os.path.exists(file_b), f"Expected output file {file_b} not found."
@@ -269,11 +280,13 @@ def test_split_by_key_basic(temp_output_dir):
 
 def test_split_by_key_missing_group(temp_output_dir):
     """Test splitting by key with missing keys grouped (default)."""
-    output_prefix = str(temp_output_dir / "key_missing_group")
+    output_dir = temp_output_dir
+    base_name = "key_missing_group"
     key_name = "category"
     run_splitter([
-        SAMPLE_ARRAY_WITH_MISSING_FILE, # Use file with missing keys
-        output_prefix,
+        str(SAMPLE_ARRAY_WITH_MISSING_FILE), # Use file with missing keys
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "key",
         "--value", key_name,
         "--path", "item",
@@ -281,10 +294,10 @@ def test_split_by_key_missing_group(temp_output_dir):
     ])
 
     # Expect A, B, and the special missing key file
-    file_a = f"{output_prefix}_key_A.jsonl"
-    file_b = f"{output_prefix}_key_B.jsonl"
-    file_c = f"{output_prefix}_key_C.jsonl"
-    file_missing = f"{output_prefix}_key___missing_key__.jsonl"
+    file_a = output_dir / f"{base_name}_key_A.jsonl"
+    file_b = output_dir / f"{base_name}_key_B.jsonl"
+    file_c = output_dir / f"{base_name}_key_C.jsonl"
+    file_missing = output_dir / f"{base_name}_key___missing_key__.jsonl"
 
     assert os.path.exists(file_a)
     assert os.path.exists(file_b)
@@ -299,11 +312,13 @@ def test_split_by_key_missing_group(temp_output_dir):
 
 def test_split_by_key_missing_skip(temp_output_dir):
     """Test splitting by key with missing keys skipped."""
-    output_prefix = str(temp_output_dir / "key_missing_skip")
+    output_dir = temp_output_dir
+    base_name = "key_missing_skip"
     key_name = "category"
     run_splitter([
-        SAMPLE_ARRAY_WITH_MISSING_FILE, # Use file with missing keys
-        output_prefix,
+        str(SAMPLE_ARRAY_WITH_MISSING_FILE), # Use file with missing keys
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "key",
         "--value", key_name,
         "--path", "item",
@@ -311,10 +326,10 @@ def test_split_by_key_missing_skip(temp_output_dir):
     ])
 
     # Expect A, B, but NOT the missing key file
-    file_a = f"{output_prefix}_key_A.jsonl"
-    file_b = f"{output_prefix}_key_B.jsonl"
-    file_c = f"{output_prefix}_key_C.jsonl"
-    file_missing = f"{output_prefix}_key___missing_key__.jsonl"
+    file_a = output_dir / f"{base_name}_key_A.jsonl"
+    file_b = output_dir / f"{base_name}_key_B.jsonl"
+    file_c = output_dir / f"{base_name}_key_C.jsonl"
+    file_missing = output_dir / f"{base_name}_key___missing_key__.jsonl"
 
     assert os.path.exists(file_a)
     assert os.path.exists(file_b)
@@ -331,14 +346,16 @@ def test_split_by_key_missing_skip(temp_output_dir):
 
 def test_split_by_key_missing_error(temp_output_dir):
     """Test splitting by key with missing keys causing an error."""
-    output_prefix = str(temp_output_dir / "key_missing_error")
+    output_dir = temp_output_dir
+    base_name = "key_missing_error"
     key_name = "category"
+    expected_error_msg = f"Key '{key_name}' not found"
 
-    # Expect the script to fail (non-zero exit code)
     with pytest.raises(subprocess.CalledProcessError) as excinfo:
         run_splitter([
-            SAMPLE_ARRAY_WITH_MISSING_FILE, # Use file with missing keys
-            output_prefix,
+            str(SAMPLE_ARRAY_WITH_MISSING_FILE), # Use file with missing keys
+            "--output-dir", str(output_dir),
+            "--base-name", base_name,
             "--split-by", "key",
             "--value", key_name,
             "--path", "item",
@@ -346,26 +363,28 @@ def test_split_by_key_missing_error(temp_output_dir):
         ])
 
     # Check stderr for indication of the key error (adapt based on actual script output)
-    assert f"Key '{key_name}' not found" in excinfo.value.stderr
+    assert expected_error_msg in excinfo.value.stderr
     # The critical log might not be written if script exits early via log.error + sys.exit
     # Check for the initial ERROR log instead
     assert f"ERROR: Key '{key_name}' not found" in excinfo.value.stderr
 
     # Ensure no output files were created (or maybe partial ones before error? Check)
-    files = glob.glob(f"{output_prefix}*.jsonl")
+    files = glob.glob(os.path.join(output_dir, f"{base_name}*.jsonl"))
     # Allow for potentially partial files before error, but the missing_key one shouldn't exist
     # A more robust check might ensure the error happened *before* all processing finished.
-    assert f"{output_prefix}_key___missing_key__.jsonl" not in files, "Missing key file created despite error setting."
+    assert f"{base_name}_key___missing_key__.jsonl" not in files, "Missing key file created despite error setting."
 
 # --- on-invalid-item Tests --- #
 
 def test_split_by_key_invalid_item_warn(temp_output_dir):
     """Test key splitting with invalid items triggering warnings (default)."""
-    output_prefix = str(temp_output_dir / "key_invalid_warn")
+    output_dir = temp_output_dir
+    base_name = "key_invalid_warn"
     key_name = "category"
     result = run_splitter([
-        SAMPLE_MIXED_ITEMS_FILE,
-        output_prefix,
+        str(SAMPLE_MIXED_ITEMS_FILE),
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "key",
         "--value", key_name,
         "--path", "item",
@@ -378,9 +397,9 @@ def test_split_by_key_invalid_item_warn(temp_output_dir):
     assert "WARNING: Item 5 at path 'item' is not an object (type: <class 'int'>). Skipping key check." in result.stderr
 
     # Check that valid items were processed correctly
-    file_a = f"{output_prefix}_key_A.jsonl"
-    file_b = f"{output_prefix}_key_B.jsonl"
-    file_missing = f"{output_prefix}_key___missing_key__.jsonl"
+    file_a = output_dir / f"{base_name}_key_A.jsonl"
+    file_b = output_dir / f"{base_name}_key_B.jsonl"
+    file_missing = output_dir / f"{base_name}_key___missing_key__.jsonl"
 
     assert os.path.exists(file_a)
     assert os.path.exists(file_b)
@@ -393,11 +412,13 @@ def test_split_by_key_invalid_item_warn(temp_output_dir):
 
 def test_split_by_key_invalid_item_skip(temp_output_dir):
     """Test key splitting with invalid items skipped silently."""
-    output_prefix = str(temp_output_dir / "key_invalid_skip")
+    output_dir = temp_output_dir
+    base_name = "key_invalid_skip"
     key_name = "category"
     result = run_splitter([
-        SAMPLE_MIXED_ITEMS_FILE, # Uses file with string/int items
-        output_prefix,
+        str(SAMPLE_MIXED_ITEMS_FILE), # Uses file with string/int items
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "key",
         "--value", key_name,
         "--path", "item",
@@ -410,9 +431,9 @@ def test_split_by_key_invalid_item_skip(temp_output_dir):
     assert "is not an object/dict" not in result.stderr
 
     # Check that valid items were processed correctly (same as warn test)
-    file_a = f"{output_prefix}_key_A.jsonl"
-    file_b = f"{output_prefix}_key_B.jsonl"
-    file_missing = f"{output_prefix}_key___missing_key__.jsonl"
+    file_a = output_dir / f"{base_name}_key_A.jsonl"
+    file_b = output_dir / f"{base_name}_key_B.jsonl"
+    file_missing = output_dir / f"{base_name}_key___missing_key__.jsonl"
 
     assert os.path.exists(file_a)
     assert os.path.exists(file_b)
@@ -425,37 +446,37 @@ def test_split_by_key_invalid_item_skip(temp_output_dir):
 
 def test_split_by_key_invalid_item_error(temp_output_dir):
     """Test key splitting with invalid items causing an error."""
-    output_prefix = str(temp_output_dir / "key_invalid_error")
+    output_dir = temp_output_dir
+    base_name = "key_invalid_error"
     key_name = "category"
+    expected_error_msg = "Item 2 at path 'item' is not an object (type: <class 'str'>)."
 
-    # Expect the script to fail (non-zero exit code)
     with pytest.raises(subprocess.CalledProcessError) as excinfo:
         run_splitter([
-            SAMPLE_MIXED_ITEMS_FILE,
-            output_prefix,
+            str(SAMPLE_MIXED_ITEMS_FILE),
+            "--output-dir", str(output_dir),
+            "--base-name", base_name,
             "--split-by", "key",
             "--value", key_name,
             "--path", "item",
             "--on-invalid-item", "error"
         ])
 
-    # Check stderr for indication of the type error
-    # Check the specific ERROR log message
-    assert "ERROR: Item 2 at path 'item' is not an object (type: <class 'str'>)." in excinfo.value.stderr
-
 # --- Secondary Constraint Tests --- #
 
 def test_split_count_with_max_size(temp_output_dir):
     """Test count splitting with a secondary max_size limit."""
-    output_prefix = str(temp_output_dir / "count_max_size")
+    output_dir = temp_output_dir
+    base_name = "count_max_size"
     primary_count = 5 # Primary target: 5 items per chunk
     # Estimate: items are ~60 bytes each. 5 items ~ 300 bytes + overhead.
     # Set max size low enough to trigger before 5 items.
     max_size_bytes = 150
 
     run_splitter([
-        SAMPLE_ARRAY_FILE, # 7 items total
-        output_prefix,
+        str(SAMPLE_ARRAY_FILE), # 7 items total
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "count",
         "--value", str(primary_count),
         "--path", "item",
@@ -463,7 +484,7 @@ def test_split_count_with_max_size(temp_output_dir):
         "--output-format", "jsonl" # Easier size check for JSONL
     ])
 
-    files = sorted(glob.glob(f"{output_prefix}_chunk_*.jsonl"))
+    files = sorted(glob.glob(os.path.join(output_dir, f"{base_name}_chunk_*.jsonl")))
 
     # Expectation: Chunk 0 should be split by size before reaching 5 items.
     # Item sizes: ~60-70 bytes. 150B limit -> split after 2 items usually.
@@ -473,10 +494,10 @@ def test_split_count_with_max_size(temp_output_dir):
     # Total files expected: 3 parts for chunk 0 + 1 file for chunk 1 = 4 files
     assert len(files) >= 3, f"Expected more files due to size constraint, found {len(files)}: {files}"
 
-    chunk0_part0 = f"{output_prefix}_chunk_0000.jsonl"
-    chunk0_part1 = f"{output_prefix}_chunk_0000_part_0001.jsonl"
-    chunk0_part2 = f"{output_prefix}_chunk_0000_part_0002.jsonl"
-    chunk1 = f"{output_prefix}_chunk_0001.jsonl"
+    chunk0_part0 = os.path.join(output_dir, f"{base_name}_chunk_0000.jsonl")
+    chunk0_part1 = os.path.join(output_dir, f"{base_name}_chunk_0000_part_0001.jsonl")
+    chunk0_part2 = os.path.join(output_dir, f"{base_name}_chunk_0000_part_0002.jsonl")
+    chunk1 = os.path.join(output_dir, f"{base_name}_chunk_0001.jsonl")
 
     assert os.path.exists(chunk0_part0)
     assert os.path.exists(chunk0_part1)
@@ -494,20 +515,22 @@ def test_split_count_with_max_size(temp_output_dir):
 
 def test_split_count_with_max_records(temp_output_dir):
     """Test count splitting where max_records overrides the primary count."""
-    output_prefix = str(temp_output_dir / "count_max_records")
+    output_dir = temp_output_dir
+    base_name = "count_max_rec"
     primary_count = 5
     max_records = 2 # Smaller than primary_count
 
     run_splitter([
-        SAMPLE_ARRAY_FILE, # 7 items
-        output_prefix,
+        str(SAMPLE_ARRAY_FILE), # 7 items
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "count",
         "--value", str(primary_count),
         "--path", "item",
         "--max-records", str(max_records)
     ])
 
-    files = sorted(glob.glob(f"{output_prefix}_chunk_*.json"))
+    files = sorted(glob.glob(os.path.join(output_dir, f"{base_name}_chunk_*.json")))
 
     # Effective split is by max_records=2. 7 items -> 4 files.
     # No secondary parts expected as max_records IS the primary effective limit.
@@ -529,13 +552,15 @@ def test_split_count_with_max_records(temp_output_dir):
 
 def test_split_key_with_max_records(temp_output_dir):
     """Test key splitting with a secondary max_records limit."""
-    output_prefix = str(temp_output_dir / "key_max_records")
+    output_dir = temp_output_dir
+    base_name = "key_max_rec"
     key_name = "category"
     max_records = 2
 
     run_splitter([
-        SAMPLE_ARRAY_FILE, # A:4, B:2, C:1 -> Use original file for this
-        output_prefix,
+        str(SAMPLE_ARRAY_FILE), # A:4, B:2, C:1 -> Use original file for this
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "key",
         "--value", key_name,
         "--path", "item",
@@ -546,11 +571,11 @@ def test_split_key_with_max_records(temp_output_dir):
     # Expect category B (2 items) NOT split
     # Expect category C (1 item) NOT split
     # Expect Missing NOT created (as input file has no missing keys)
-    file_a = f"{output_prefix}_key_A.jsonl"
-    file_b = f"{output_prefix}_key_B.jsonl"
-    file_c = f"{output_prefix}_key_C.jsonl"
-    file_missing = f"{output_prefix}_key___missing_key__.jsonl"
-    file_a_part1 = f"{output_prefix}_key_A_part_0001.jsonl" # SHOULD exist now
+    file_a = output_dir / f"{base_name}_key_A.jsonl"
+    file_b = output_dir / f"{base_name}_key_B.jsonl"
+    file_c = output_dir / f"{base_name}_key_C.jsonl"
+    file_missing = output_dir / f"{base_name}_key___missing_key__.jsonl"
+    file_a_part1 = output_dir / f"{base_name}_key_A_part_0001.jsonl" # SHOULD exist now
 
     assert os.path.exists(file_a), f"File {file_a} missing."
     assert os.path.exists(file_b), f"File {file_b} missing."
@@ -566,15 +591,17 @@ def test_split_key_with_max_records(temp_output_dir):
 
 def test_split_key_with_max_size(temp_output_dir):
     """Test key splitting with a secondary max_size limit."""
-    output_prefix = str(temp_output_dir / "key_max_size")
+    output_dir = temp_output_dir
+    base_name = "key_max_size"
     key_name = "category"
     # Items ~60 bytes. Category A has 4 items (~240 bytes).
     # Set limit low enough to split category A.
     max_size_bytes = 120
 
     run_splitter([
-        SAMPLE_ARRAY_FILE,
-        output_prefix,
+        str(SAMPLE_ARRAY_FILE),
+        "--output-dir", str(output_dir),
+        "--base-name", base_name,
         "--split-by", "key",
         "--value", key_name,
         "--path", "item",
@@ -585,12 +612,12 @@ def test_split_key_with_max_size(temp_output_dir):
     # Expect category B (2 items, ~78B) NOT to be split by size
     # Expect category C (1 item, ~70B) NOT split
     # Expect Missing NOT created (as input file has no missing keys)
-    file_a_part0 = f"{output_prefix}_key_A.jsonl"
-    file_a_part1 = f"{output_prefix}_key_A_part_0001.jsonl"
-    file_b = f"{output_prefix}_key_B.jsonl"
-    file_b_part1 = f"{output_prefix}_key_B_part_0001.jsonl"
-    file_c = f"{output_prefix}_key_C.jsonl"
-    file_missing = f"{output_prefix}_key___missing_key__.jsonl"
+    file_a_part0 = output_dir / f"{base_name}_key_A.jsonl"
+    file_a_part1 = output_dir / f"{base_name}_key_A_part_0001.jsonl"
+    file_b = output_dir / f"{base_name}_key_B.jsonl"
+    file_b_part1 = output_dir / f"{base_name}_key_B_part_0001.jsonl"
+    file_c = output_dir / f"{base_name}_key_C.jsonl"
+    file_missing = output_dir / f"{base_name}_key___missing_key__.jsonl"
 
     assert os.path.exists(file_a_part0), "Part 0 for key A missing."
     assert os.path.exists(file_a_part1), "Part 1 for key A missing."
@@ -610,38 +637,42 @@ def test_split_key_with_max_size(temp_output_dir):
 
 def test_error_file_not_found(temp_output_dir):
     """Test running the script with a non-existent input file."""
-    output_prefix = str(temp_output_dir / "error_not_found")
-    non_existent_file = "/path/to/non/existent/file.json"
+    output_dir = temp_output_dir
+    base_name = "err_not_found"
+    expected_error_msg = f"Input file not found: {NONEXISTENT_FILE}"
 
-    # Expect the script to fail (non-zero exit code)
-    # The error might be caught by our validation or CalledProcessError
     with pytest.raises(subprocess.CalledProcessError) as excinfo:
         run_splitter([
-            non_existent_file,
-            output_prefix,
+            str(NONEXISTENT_FILE),
+            "--output-dir", str(output_dir),
+            "--base-name", base_name,
             "--split-by", "count",
             "--value", "10",
             "--path", "item"
         ])
 
     # Check stderr for the file not found message from our validation
-    assert f"Input file not found: {non_existent_file}" in excinfo.value.stderr
+    assert expected_error_msg in excinfo.value.stderr
 
 def test_error_invalid_json(temp_output_dir):
     """Test running the script with invalid JSON input."""
-    output_prefix = str(temp_output_dir / "error_invalid_json")
+    output_dir = temp_output_dir
+    base_name = "err_invalid_json"
+    # The exact error message from ijson might vary, check for key parts
+    expected_error_msg = "Error parsing JSON"
 
     with pytest.raises(subprocess.CalledProcessError) as excinfo:
         run_splitter([
-            INVALID_JSON_FILE,
-            output_prefix,
+            str(INVALID_JSON_FILE),
+            "--output-dir", str(output_dir),
+            "--base-name", base_name,
             "--split-by", "count",
-            "--value", "1",
+            "--value", "10",
             "--path", "item"
         ])
 
     # Check stderr for a JSON parsing error message
-    assert "Error parsing JSON" in excinfo.value.stderr
+    assert expected_error_msg in excinfo.value.stderr
 
 @pytest.mark.parametrize(
     "test_id, args, expected_error_msg",
@@ -700,11 +731,17 @@ def test_error_invalid_json(temp_output_dir):
 )
 def test_error_invalid_args(temp_output_dir, test_id, args, expected_error_msg):
     """Test running the script with various invalid arguments."""
-    output_prefix = str(temp_output_dir / f"error_args_{test_id}")
-    input_file = SAMPLE_ARRAY_FILE # Use a valid file for arg tests
+    output_dir = temp_output_dir
+    # For args tests, the base name isn't critical, use a fixed one or derive?
+    base_name = f"error_args_{test_id}"
+    input_file = str(SAMPLE_ARRAY_FILE) # Use a valid file for arg tests
 
-    # Construct command: add input/output prefix to the specific args
-    cmd_args = [input_file, output_prefix] + args
+    # Construct command: add input file and new dir/name args
+    # Base command parts that are always needed (or should be for valid errors)
+    # We need input_file positional, but others are flags now.
+    base_cmd = [input_file, "--output-dir", str(output_dir), "--base-name", base_name]
+    # Specific failing args for this test case
+    cmd_args = base_cmd + args
 
     with pytest.raises(subprocess.CalledProcessError) as excinfo:
         run_splitter(cmd_args)
