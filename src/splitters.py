@@ -226,7 +226,23 @@ class CountSplitter(SplitterBase):
             tracker = ProgressTracker(logger=self.log, report_interval=self._report_interval)
 
             with open(self.input_file, 'rb') as f:
-                items_iterator = ijson.items(f, self.path)
+                items_iterator = None # Initialize to None before try block
+                try:
+                    # *** Attempt to create the iterator ***
+                    items_iterator = ijson.items(f, self.path)
+                except ijson.common.JSONError as e:
+                    # *** Catch error DURING iterator setup ***
+                    line, col = getattr(e, 'lineno', None), getattr(e, 'colno', None)
+                    line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
+                    self.log.error(f"Fatal JSON error setting up iterator for '{self.input_file}'{line_col_str}: {e}. Cannot process file.")
+                    raise # Re-raise to be caught by the outer block and trigger failure reporting
+
+                # Check if iterator was successfully created before proceeding
+                if items_iterator is None:
+                    self.log.error("Failed to initialize JSON item iterator, possibly due to an unexpected issue.")
+                    # Raise a generic error as the specific JSONError should have been caught above
+                    raise RuntimeError("Iterator initialization failed without specific JSONError.")
+
                 chunk = []
                 primary_chunk_index = 0
                 items_in_primary_chunk = 0 # Used when NOT split_by_max_records_only
@@ -303,6 +319,7 @@ class CountSplitter(SplitterBase):
                             current_part_size_bytes = base_overhead # Reset size for new primary chunk
 
                     except ijson.common.JSONError as e:
+                        # *** Inner catch for errors DURING item parsing ***
                         items_skipped += 1
                         self.log.warning(f"Skipping item ~#{item_count_total_overall} due to JSON parsing/encoding error: {e}")
                         # If a partial chunk exists and we skip, should we write it?
@@ -321,11 +338,13 @@ class CountSplitter(SplitterBase):
         except FileNotFoundError:
              self.log.error(f"Input file not found: {self.input_file}")
              success_flag = False
-        except ijson.common.JSONError as e:
-             # Catches errors during iterator creation or early stream reading
-             line, col = getattr(e, 'lineno', None), getattr(e, 'colno', None)
-             line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
-             self.log.error(f"Fatal JSON error processing '{self.input_file}' near beginning or during setup{line_col_str}: {e}")
+        except ijson.common.JSONError as e: # Catches re-raised setup error or other fatal ijson errors
+             # Error message logged during setup failure or here if another fatal error
+             # Ensure a generic message if not logged previously
+             if "Fatal JSON error setting up iterator" not in str(e): # Avoid duplicate logging somewhat crudely
+                 line, col = getattr(e, 'lineno', None), getattr(e, 'colno', None)
+                 line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
+                 self.log.error(f"Fatal JSON error processing '{self.input_file}'{line_col_str}: {e}")
              success_flag = False
         except (IOError, OSError) as e:
             self.log.error(f"File system error during count splitting: {e}")
@@ -336,7 +355,7 @@ class CountSplitter(SplitterBase):
         finally:
              # Report skipped items
              if items_skipped > 0:
-                 self.log.warning(f"Completed splitting, but skipped {items_skipped} items due to parsing/encoding errors.")
+                 self.log.warning(f"Completed splitting, but skipped {items_skipped} items due to parsing/encoding errors during processing.")
              # Make sure finalize is called even if loop didn't run or failed early
              if tracker:
                  tracker.finalize()
@@ -389,7 +408,22 @@ class SizeSplitter(SplitterBase):
             tracker = ProgressTracker(logger=self.log, report_interval=self._report_interval)
 
             with open(self.input_file, 'rb') as f:
-                items_iterator = ijson.items(f, self.path)
+                items_iterator = None # Initialize to None
+                try:
+                    # *** Attempt to create the iterator ***
+                    items_iterator = ijson.items(f, self.path)
+                except ijson.common.JSONError as e:
+                    # *** Catch error DURING iterator setup ***
+                    line, col = getattr(e, 'lineno', None), getattr(e, 'colno', None)
+                    line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
+                    self.log.error(f"Fatal JSON error setting up iterator for '{self.input_file}'{line_col_str}: {e}. Cannot process file.")
+                    raise # Re-raise
+
+                # Check if iterator was successfully created
+                if items_iterator is None:
+                    self.log.error("Failed to initialize JSON item iterator.")
+                    raise RuntimeError("Iterator initialization failed without specific JSONError.")
+
                 chunk = []
                 chunk_index = 0
                 item_count_total_overall = 0
@@ -575,7 +609,21 @@ class KeySplitter(SplitterBase):
             tracker = ProgressTracker(logger=self.log, report_interval=self._report_interval)
 
             with open(self.input_file, 'rb') as f:
-                items_iterator = ijson.items(f, self.path)
+                items_iterator = None # Initialize to None
+                try:
+                    # *** Attempt to create the iterator ***
+                    items_iterator = ijson.items(f, self.path)
+                except ijson.common.JSONError as e:
+                    # *** Catch error DURING iterator setup ***
+                    line, col = getattr(e, 'lineno', None), getattr(e, 'colno', None)
+                    line_col_str = f" around line {line}, column {col}" if line is not None and col is not None else ""
+                    self.log.error(f"Fatal JSON error setting up iterator for '{self.input_file}'{line_col_str}: {e}. Cannot process file.")
+                    raise # Re-raise
+
+                # Check if iterator was successfully created
+                if items_iterator is None:
+                    self.log.error("Failed to initialize JSON item iterator.")
+                    raise RuntimeError("Iterator initialization failed without specific JSONError.")
 
                 for items_processed, item_candidate in enumerate(items_iterator, 1):
                     tracker.update(items_processed) # Call new tracker update
