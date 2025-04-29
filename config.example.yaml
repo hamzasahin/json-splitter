@@ -1,0 +1,78 @@
+# Example configuration file for JSON Splitter
+#
+# Usage: python -m src.main --config config.yaml [optional_cli_overrides]
+#
+# Command-line arguments override settings defined in this file.
+
+# --- Required Settings --- #
+# input_file: path/to/your/large_input.json
+# split_by: count | size | key
+# value: <value_for_split_by> # e.g., 10000, 50MB, user_id
+# path: <json_path_to_items> # e.g., item, data.records.item
+
+# Example: Split a large user data file by count
+input_file: /path/to/input/user_data.json
+split_by: count
+value: 10000
+path: results.users.item # Path to the array of user objects
+
+# Example: Split a log file by size
+# input_file: /path/to/input/large_log.json
+# split_by: size
+# value: 100MB
+# path: events.item
+
+# Example: Split orders by customer_id (key)
+# input_file: /path/to/input/orders.json
+# split_by: key
+# value: customer_id
+# path: item # Assuming orders are in the root array
+
+
+# --- Common Optional Settings --- #
+
+# Directory to save output files
+# Default: . (current directory)
+output_dir: ./output/
+
+# Base name for output files
+# Default: chunk
+base_name: user_chunk
+
+# Output format: json or jsonl
+# Default: json (unless split_by is 'key', then jsonl is forced)
+output_format: json
+
+# Secondary limit: Max records per output file part
+# Default: null (None)
+max_records: null
+
+# Secondary limit: Max approx size per output file part (e.g., '50MB')
+# Default: null (None)
+max_size: null
+
+# Format string for output filenames.
+# Placeholders: {base_name}, {type}, {index}, {part}, {ext}
+# Default for count/size: "{base_name}_{type}_{index:04d}{part}.{ext}"
+# Default for key: "{base_name}_key_{index}{part}.{ext}"
+# filename_format: "{base_name}_part_{index}.{ext}"
+
+# Enable verbose debug logging
+# Default: false
+verbose: false
+
+# How often to report progress (number of items). Set to 0 to disable.
+# Default: 10000
+report_interval: 5000
+
+
+# --- Key Splitting Options --- #
+# (Only relevant if split_by is 'key')
+
+# Action for items missing the key: group, skip, error
+# Default: group
+on_missing_key: group
+
+# Action for items at path not being objects: warn, skip, error
+# Default: warn
+on_invalid_item: warn 

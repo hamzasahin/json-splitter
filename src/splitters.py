@@ -13,14 +13,16 @@ class SplitterBase:
 
     # PROGRESS_INTERVAL = PROGRESS_REPORT_INTERVAL # Commented out/removed old constant use
 
-    def __init__(self, input_file, output_prefix, path, output_format,
+    def __init__(self, input_file, output_dir, base_name, path, output_format,
                  max_records=None, max_size=None, # Use max_size string here
                  filename_format=None, verbose=False,
                  created_files_set=None,
                  report_interval: int = 10000, # Added report_interval parameter
                  **kwargs): # Accept extra args
         self.input_file = input_file
-        self.output_prefix = output_prefix
+        # self.output_prefix = output_prefix # Removed
+        self.output_dir = output_dir
+        self.base_name = base_name
         self.path = path if path else '' # Ensure path is not None
         self.output_format = output_format
         self.max_records = max_records
@@ -82,7 +84,7 @@ class SplitterBase:
         index_val = key_value if split_type == 'key' else primary_index
 
         format_args = {
-            'prefix': self.output_prefix,
+            'base_name': self.base_name,
             'type': split_type,
             'index': index_val,
             'part': part_suffix,
@@ -92,49 +94,68 @@ class SplitterBase:
         # Determine the correct filename format string
         current_format = self.filename_format
         if not current_format: # Use default if None
-             current_format = "{prefix}_key_{index}{part}.{ext}" if split_type == 'key' else "{prefix}_{type}_{index:04d}{part}.{ext}"
+             current_format = "{base_name}_key_{index}{part}.{ext}" if split_type == 'key' else "{base_name}_{type}_{index:04d}{part}.{ext}"
         # Handle potential mismatch if user didn't provide format and split_type is key
         elif split_type == 'key' and '{index:04d}' in current_format:
             self.log.debug("Defaulting key split filename format as provided format seems intended for count/size.")
-            current_format = "{prefix}_key_{index}{part}.{ext}"
+            current_format = "{base_name}_key_{index}{part}.{ext}"
         # Handle potential mismatch if user didn't provide format and split_type is chunk
         elif split_type == 'chunk' and '{index}' in current_format and ':' not in current_format.split('{index}')[-1].split('}')[0]: # Check if index is used without formatting
             self.log.debug("Defaulting chunk split filename format as provided format seems intended for key.")
-            current_format = "{prefix}_{type}_{index:04d}{part}.{ext}"
+            current_format = "{base_name}_{type}_{index:04d}{part}.{ext}"
 
         try:
-            # Apply formatting based on split type
+            # Apply formatting based on split type to get the basename
+            formatted_basename = ""
             if split_type == 'chunk':
-                 output_filename = current_format.format(**format_args)
+                 formatted_basename = current_format.format(**format_args)
             else: # key split - index is string
                 # Ensure the format string doesn't try to apply number formatting to the key string
                 temp_format = current_format.replace("{index:04d}", "{index}") # Basic safeguard
-                output_filename = temp_format.format(**format_args)
+                formatted_basename = temp_format.format(**format_args)
 
-            # Basic validation
-            basename = os.path.basename(output_filename)
-            if not basename or '/' in basename or '\\' in basename:
-                raise ValueError(f"Generated filename '{output_filename}' seems invalid (contains path separators).")
+            # Construct the full path
+            output_filename = os.path.join(self.output_dir, formatted_basename)
+
+            # Basic validation on the final path
+            # Check if the generated path tries to escape the output directory (e.g., ../..)
+            # This is a basic check, more robust checks exist
+            abs_output_dir = os.path.abspath(self.output_dir)
+            abs_output_file = os.path.abspath(output_filename)
+            if not abs_output_file.startswith(abs_output_dir):
+                 raise ValueError(f"Generated filename path '{output_filename}' attempts to escape the output directory '{self.output_dir}'.")
+
+            # Check for potentially invalid characters in the basename part after formatting
+            check_basename = os.path.basename(formatted_basename)
+            if not check_basename or '/' in check_basename or '\\' in check_basename:
+                 raise ValueError(f"Generated filename '{formatted_basename}' contains invalid path separators or is empty.")
 
         except (KeyError, ValueError) as e:
             self.log.error(f"Error applying filename format '{current_format}': {e}. Using fallback naming.")
+            # Fallback uses base_name now
             fallback_part_suffix = f"_part_{part_index:04d}" if part_index is not None and part_index > 0 else ""
+            fallback_basename = ""
             if split_type == 'key':
-                output_filename = f"{self.output_prefix}_key_{index_val}{fallback_part_suffix}.{extension}"
+                fallback_basename = f"{self.base_name}_key_{index_val}{fallback_part_suffix}.{extension}"
             else:
-                # Ensure index_val is treated as an int for formatting
-                try: index_num = int(index_val) 
+                try: index_num = int(index_val)
                 except: index_num = 0 # Fallback index
-                output_filename = f"{self.output_prefix}_chunk_{index_num:04d}{fallback_part_suffix}.{extension}"
+                fallback_basename = f"{self.base_name}_chunk_{index_num:04d}{fallback_part_suffix}.{extension}"
+            output_filename = os.path.join(self.output_dir, fallback_basename)
+            self.log.warning(f"Using fallback filename: {output_filename}")
+
         except Exception as e:
             self.log.error(f"Unexpected error formatting filename with '{current_format}': {e}. Using fallback naming.")
             fallback_part_suffix = f"_part_{part_index:04d}" if part_index is not None and part_index > 0 else ""
+            fallback_basename = ""
             if split_type == 'key':
-                 output_filename = f"{self.output_prefix}_key_{index_val}{fallback_part_suffix}.{extension}"
+                 fallback_basename = f"{self.base_name}_key_{index_val}{fallback_part_suffix}.{extension}"
             else:
-                try: index_num = int(index_val) 
+                try: index_num = int(index_val)
                 except: index_num = 0
-                output_filename = f"{self.output_prefix}_chunk_{index_num:04d}{fallback_part_suffix}.{extension}"
+                fallback_basename = f"{self.base_name}_chunk_{index_num:04d}{fallback_part_suffix}.{extension}"
+            output_filename = os.path.join(self.output_dir, fallback_basename)
+            self.log.warning(f"Using fallback filename: {output_filename}")
 
         # Track file before attempting to write
         self.created_files_set.add(output_filename)
@@ -143,10 +164,10 @@ class SplitterBase:
         self.log.debug(f"    Format: {self.output_format}, Index: {index_val}, Part: {part_index}")
 
         try:
-            # Ensure output directory exists
-            output_dir = os.path.dirname(output_filename)
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
+            # Ensure output directory exists (should have been validated/created by cli.py, but double-check)
+            # output_dir = os.path.dirname(output_filename) # No longer needed, self.output_dir is known
+            if self.output_dir:
+                os.makedirs(self.output_dir, exist_ok=True)
 
             # Use 'w' mode; each call creates/overwrites a distinct file part
             with open(output_filename, 'w', encoding='utf-8') as outfile:
@@ -155,7 +176,7 @@ class SplitterBase:
                         json.dump(item, outfile)
                         outfile.write('\n')
                 else: # json
-                    json.dump(chunk_data, outfile, indent=None)
+                    json.dump(chunk_data, outfile, indent=4)
             return output_filename # Return filename on success
         except IOError as e:
             self.log.error(f"Error writing to file {output_filename}: {e}")
@@ -494,16 +515,15 @@ class KeySplitter(SplitterBase):
 
     def split(self):
         self.log.info(f"Splitting '{self.input_file}' at path '{self.path}' by key '{self.key_name}'...")
-        self.log.info(f"  Output format forced to: {self.output_format}")
+        self.log.info(f"Output directory: {os.path.abspath(self.output_dir)}")
+        self.log.info(f"Base name: {self.base_name}")
+        self.log.info(f"Maximum open files cache size: {MAX_OPEN_FILES_KEY_SPLIT}")
+        if self.max_records: self.log.info(f"  Secondary limit: Max {self.max_records} records per file part.")
+        if self.max_size_bytes: self.log.info(f"  Secondary limit: Max ~{self.max_size_bytes / (1024*1024):.2f} MB per file part.")
 
-        # File cache: Maps sanitized key value -> open file handle
-        file_cache = LRUCache(maxsize=MAX_OPEN_FILES_KEY_SPLIT)
-        # Track parts per key: Maps sanitized key value -> current part index
-        key_part_indices = {}
-        # Track records/size per *open file*: Maps filename -> (record_count, approx_bytes)
-        file_stats = {}
-
-        # Initialize Progress Tracker
+        # Use cachetools LRUCache for managing file handles
+        open_files_cache = LRUCache(maxsize=MAX_OPEN_FILES_KEY_SPLIT)
+        file_stats = {} # Track records/size per file {filename: {count: N, size: M, part: P}}
         tracker = ProgressTracker(logger=self.log, report_interval=self._report_interval)
 
         items_processed = 0
@@ -571,13 +591,13 @@ class KeySplitter(SplitterBase):
 
                         # LRU Cache Logic
                         state = None
-                        if sanitized_value in file_cache:
-                            state = file_cache[sanitized_value]
+                        if sanitized_value in open_files_cache:
+                            state = open_files_cache[sanitized_value]
                             self.log.debug(f"Cache hit for key '{sanitized_value}'.")
                         else:
                             self.log.debug(f"Cache miss for key '{sanitized_value}'.")
-                            if len(file_cache) >= MAX_OPEN_FILES_KEY_SPLIT:
-                                evicted_key, evicted_state = file_cache.popitem()
+                            if len(open_files_cache) >= MAX_OPEN_FILES_KEY_SPLIT:
+                                evicted_key, evicted_state = open_files_cache.popitem()
                                 self.log.debug(f"Cache full. Evicting state for key '{evicted_key}'.")
                                 try:
                                     handle = evicted_state.get('handle')
@@ -587,11 +607,10 @@ class KeySplitter(SplitterBase):
                                 except IOError as e:
                                     self.log.warning(f"Error closing evicted file for key '{evicted_key}': {e}")
 
-                            mode = 'a' if sanitized_value in key_part_indices else 'w'
+                            mode = 'a' if sanitized_value in file_stats else 'w'
                             self.log.debug(f"Key '{sanitized_value}' mode: '{mode}'.")
                             state = {'handle': None, 'count': 0, 'size': 0, 'part': 0, 'mode': mode}
-                            # Don't add to key_part_indices until open succeeds
-                            # Don't add state to file_stats until open succeeds
+                            # Don't add to file_stats until open succeeds
 
                         # Serialize item
                         item_size = 0
@@ -646,7 +665,7 @@ class KeySplitter(SplitterBase):
 
                             part_suffix = f"_part_{state['part']:04d}" if state['part'] > 0 else ""
                             format_args = {
-                                'prefix': self.output_prefix, 'type': 'key',
+                                'prefix': self.base_name, 'type': 'key',
                                 'index': sanitized_value, 'part': part_suffix,
                                 'ext': self.file_format_extension
                             }
@@ -668,11 +687,11 @@ class KeySplitter(SplitterBase):
                             except (KeyError, ValueError) as e:
                                 self.log.error(f"Error applying filename format '{self.filename_format}': {e}. Using fallback.")
                                 fallback_part_suffix = f"_part_{state['part']:04d}" if state['part'] > 0 else ""
-                                output_filename = f"{self.output_prefix}_key_{sanitized_value}{fallback_part_suffix}.{self.file_format_extension}"
+                                output_filename = f"{self.base_name}_key_{sanitized_value}{fallback_part_suffix}.{self.file_format_extension}"
                             except Exception as e:
                                  self.log.error(f"Unexpected error formatting filename: {e}. Using fallback.")
                                  fallback_part_suffix = f"_part_{state['part']:04d}" if state['part'] > 0 else ""
-                                 output_filename = f"{self.output_prefix}_key_{sanitized_value}{fallback_part_suffix}.{self.file_format_extension}"
+                                 output_filename = f"{self.base_name}_key_{sanitized_value}{fallback_part_suffix}.{self.file_format_extension}"
 
                             # Track file before attempting to open
                             self.created_files_set.add(output_filename)
@@ -685,18 +704,18 @@ class KeySplitter(SplitterBase):
 
                                 new_handle = open(output_filename, open_mode, encoding='utf-8')
                                 state['handle'] = new_handle
-                                file_cache[sanitized_value] = state # Add/update cache *after* successful open
-                                if sanitized_value not in key_part_indices:
-                                    key_part_indices[sanitized_value] = 0
+                                open_files_cache[sanitized_value] = state # Add/update cache *after* successful open
+                                if sanitized_value not in file_stats:
+                                    file_stats[sanitized_value] = {'count': 0, 'bytes': 0}
                             except IOError as e:
                                 self.log.error(f"Failed to open file '{output_filename}' for key '{sanitized_value}': {e}. Skipping item.")
                                 state['handle'] = None # Ensure handle is None on failure
-                                if sanitized_value in file_cache: del file_cache[sanitized_value]
+                                if sanitized_value in open_files_cache: del open_files_cache[sanitized_value]
                                 continue # Skip to next item
                             except Exception as e: # Catch other potential errors like permission issues
                                  self.log.exception(f"Failed to open file '{output_filename}' for key '{sanitized_value}':")
                                  state['handle'] = None
-                                 if sanitized_value in file_cache: del file_cache[sanitized_value]
+                                 if sanitized_value in open_files_cache: del open_files_cache[sanitized_value]
                                  continue
 
                         # Write item
@@ -717,7 +736,7 @@ class KeySplitter(SplitterBase):
                                     if current_handle: current_handle.close()
                                 except IOError: pass
                                 state['handle'] = None
-                                if sanitized_value in file_cache: del file_cache[sanitized_value]
+                                if sanitized_value in open_files_cache: del open_files_cache[sanitized_value]
                                 continue # Skip this item
                         else:
                             self.log.error(f"Internal Error: Handle invalid for key '{sanitized_value}' before write. Skipping.")
@@ -774,9 +793,9 @@ class KeySplitter(SplitterBase):
             # This block *always* executes, ensuring files are closed
             self.log.info("Closing remaining open files...")
             closed_count = 0
-            keys_to_clear = list(file_cache.keys())
+            keys_to_clear = list(open_files_cache.keys())
             for key in keys_to_clear: # Iterate over keys to allow cache modification
-                 state = file_cache.pop(key, None) # Remove from cache
+                 state = open_files_cache.pop(key, None) # Remove from cache
                  if state:
                      try:
                          handle = state.get('handle')
@@ -788,7 +807,7 @@ class KeySplitter(SplitterBase):
                          self.log.warning(f"Error closing file for key '{key}': {e}")
                      except Exception as e:
                           self.log.warning(f"Unexpected error closing file for key '{key}': {e}")
-            file_cache.clear()
+            open_files_cache.clear()
             self.log.info(f"Closed {closed_count} files during cleanup.")
 
         # Return the success status determined in try/except blocks
@@ -797,70 +816,99 @@ class KeySplitter(SplitterBase):
         return success_flag
 
     def _get_or_open_file(self, sanitized_key, part_index, file_cache, file_stats):
-        """Gets existing handle from cache or opens a new file part."""
-        # Check cache first (using a combined key? No, handle is enough)
-        # Caller should manage removing from cache if closed.
-
-        # Construct filename
-        # This duplicates logic from split() - needs refactoring maybe
+        """Gets file handle from cache or opens a new one. Handles filename formatting.
+           Returns (file_handle, full_file_path) or (None, None) on error.
+        """
+        # Generate the base filename using the format string
         part_suffix = f"_part_{part_index:04d}" if part_index > 0 else ""
         format_args = {
-            'prefix': self.output_prefix, 'type': 'key',
-            'index': sanitized_key, 'part': part_suffix,
-            'ext': self.output_format # Should be jsonl
+            # 'prefix': self.output_prefix,
+            'base_name': self.base_name,
+            'type': 'key',
+            'index': sanitized_key,
+            'part': part_suffix,
+            'ext': self.file_format_extension # Should be jsonl
         }
-        try:
-            # Use the filename format resolution logic
-            current_format = self.filename_format
-            if not current_format: # Use default if None
-                current_format = "{prefix}_key_{index}{part}.{ext}"
-            elif '{index:04d}' in current_format: # Basic check for wrong format type
-                current_format = "{prefix}_key_{index}{part}.{ext}"
-            # Apply formatting (handle potential :04d for keys)
-            temp_format = current_format.replace("{index:04d}", "{index}")
-            output_filename = temp_format.format(**format_args)
 
-            basename = os.path.basename(output_filename)
-            if not basename or '/' in basename or '\\' in basename:
-                raise ValueError(f"Generated filename '{output_filename}' invalid.")
+        formatted_basename = ""
+        full_file_path = None
+        try:
+            # Determine and apply format string for the basename
+            current_format = self.filename_format
+            if not current_format:
+                current_format = "{base_name}_key_{index}{part}.{ext}"
+            # Ensure the format string doesn't try to apply number formatting to the key string
+            temp_format = current_format.replace("{index:04d}", "{index}") # Basic safeguard
+            formatted_basename = temp_format.format(**format_args)
+
+            # Construct the full path
+            full_file_path = os.path.join(self.output_dir, formatted_basename)
+
+            # Add basic validation checks similar to _write_chunk
+            abs_output_dir = os.path.abspath(self.output_dir)
+            abs_output_file = os.path.abspath(full_file_path)
+            if not abs_output_file.startswith(abs_output_dir):
+                 raise ValueError(f"Generated filename path '{full_file_path}' attempts to escape the output directory '{self.output_dir}'.")
+            check_basename = os.path.basename(formatted_basename)
+            if not check_basename or '/' in check_basename or '\\' in check_basename:
+                 raise ValueError(f"Generated filename '{formatted_basename}' contains invalid path separators or is empty.")
 
         except (KeyError, ValueError) as e:
-            self.log.error(f"Error applying filename format '{self.filename_format}': {e}. Using fallback.")
+            self.log.error(f"Error applying filename format '{self.filename_format or 'default'}' for key '{sanitized_key}': {e}. Using fallback.")
             fallback_part_suffix = f"_part_{part_index:04d}" if part_index > 0 else ""
-            output_filename = f"{self.output_prefix}_key_{sanitized_key}{fallback_part_suffix}.{self.output_format}"
+            fallback_basename = f"{self.base_name}_key_{sanitized_key}{fallback_part_suffix}.{self.file_format_extension}"
+            full_file_path = os.path.join(self.output_dir, fallback_basename)
+            self.log.warning(f"Using fallback filename: {full_file_path}")
         except Exception as e:
-                self.log.error(f"Unexpected error formatting filename: {e}. Using fallback.")
+                self.log.error(f"Unexpected error formatting filename for key '{sanitized_key}': {e}. Using fallback.")
                 fallback_part_suffix = f"_part_{part_index:04d}" if part_index > 0 else ""
-                output_filename = f"{self.output_prefix}_key_{sanitized_key}{fallback_part_suffix}.{self.output_format}"
+                fallback_basename = f"{self.base_name}_key_{sanitized_key}{fallback_part_suffix}.{self.file_format_extension}"
+                full_file_path = os.path.join(self.output_dir, fallback_basename)
+                self.log.warning(f"Using fallback filename: {full_file_path}")
 
+        if full_file_path is None: # Should not happen if fallback works, but safety check
+            self.log.error(f"Could not determine filename for key '{sanitized_key}', part {part_index}. Cannot open file.")
+            return None, None
 
-        # Track file before attempting to open
-        self.created_files_set.add(output_filename)
+        # Check cache first
+        if full_file_path in file_cache:
+            # self.log.debug(f"Cache hit for {full_file_path}")
+            return file_cache[full_file_path], full_file_path
 
-        open_mode = 'w' if part_index == 0 else 'a'
-        self.log.info(f"  Opening file ({open_mode}): {output_filename}")
+        # Not in cache, open file (append mode)
+        self.log.debug(f"Cache miss. Opening {full_file_path} (Append Mode)")
         try:
-            output_dir = os.path.dirname(output_filename)
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
+            # Ensure directory exists (should be handled by CLI, but good practice)
+            # output_dir_for_file = os.path.dirname(full_file_path) # We know the dir is self.output_dir
+            if self.output_dir:
+                os.makedirs(self.output_dir, exist_ok=True)
 
-            handle = open(output_filename, open_mode, encoding='utf-8')
+            # Check if this specific file needs to be tracked (first time seeing it)
+            if full_file_path not in self.created_files_set:
+                 self.created_files_set.add(full_file_path)
+                 self.log.info(f"  Creating new output file: {full_file_path}")
 
-            # Initialize stats for the *new* file handle
-            if output_filename not in file_stats:
-                 file_stats[output_filename] = {'count': 0, 'bytes': 0}
+            # Open in append mode
+            file_handle = open(full_file_path, 'a', encoding='utf-8')
 
-            # Add handle to cache (caller should remove if needed)
-            # Note: We might overwrite an existing entry if LRU didn't evict?
-            # Consider if cache key should be (sanitized_key, part_index) ?
-            # Sticking with sanitized_key for now, assuming caller handles part logic.
-            file_cache[sanitized_key] = handle
+            # Add to cache
+            file_cache[full_file_path] = file_handle
 
-            return handle, output_filename
+            # --- Eviction Logic (Handled by LRUCache implicitly) --- #
+            # cachetools LRUCache handles eviction automatically when maxsize is reached.
+            # We need to hook into the eviction to close the file handle.
+            # HOWEVER, cachetools LRUCache doesn't directly support eviction callbacks.
+            # A more complex cache implementation would be needed for robust handle closing on eviction.
+            # For now, we rely on the explicit closing logic during part splits and the final cleanup.
+            # This means we *might* exceed MAX_OPEN_FILES_KEY_SPLIT slightly if eviction happens
+            # before our explicit close calls, but the cache size *will* be enforced.
+            # A potential improvement: Wrap LRUCache or use a different cache with dispose support.
+
+            return file_handle, full_file_path
 
         except IOError as e:
-            self.log.error(f"Failed to open file '{output_filename}' for key '{sanitized_key}': {e}. Skipping item.")
+            self.log.error(f"Could not open file {full_file_path}: {e}")
+            return None, None
         except Exception as e:
-            self.log.exception(f"Failed to open file '{output_filename}' for key '{sanitized_key}':")
-
-        return None, None # Indicate failure 
+            self.log.exception(f"Unexpected error opening file {full_file_path}: {e}")
+            return None, None 

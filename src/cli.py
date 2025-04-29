@@ -2,6 +2,7 @@ import argparse
 import sys
 import os
 import logging
+import yaml # Added for config file loading
 
 from .utils import log, parse_size # Import necessary utils
 from .splitters import CountSplitter, SizeSplitter, KeySplitter # Import splitter classes
@@ -12,8 +13,10 @@ def _prompt_with_validation(prompt_text, required=True, validation_func=None, ch
     """Generic function to prompt user with validation and choices."""
     while True:
         prompt_suffix = f" [{default}]" if default is not None else ""
+        # Modify prompt to include choices if available
+        choices_display = f" ({' / '.join(choices)})" if choices else ""
         try:
-            user_input = input(f"{prompt_text}{prompt_suffix}: ").strip()
+            user_input = input(f"{prompt_text}{choices_display}{prompt_suffix}: ").strip()
             if not user_input:
                 if default is not None:
                     return default # Return default if user just hits Enter
@@ -61,29 +64,36 @@ def _validate_input_file(filepath):
         return False, f"File is not readable (check permissions): '{filepath}'."
     return True, filepath # Return path on success
 
-def _validate_output_prefix(prefix):
-     if not prefix:
-          return False, "Output prefix cannot be empty."
-     # Basic check for potentially invalid characters in the *basename*
-     basename = os.path.basename(prefix)
-     invalid_chars = ':*?"<>|'
-     if any(c in invalid_chars for c in basename):
-         return False, f"Output prefix's filename part contains invalid characters from: {invalid_chars}"
-     # Check if directory part exists and is writable (if prefix includes a dir)
-     dirname = os.path.dirname(prefix)
-     if dirname: # If a directory path is part of the prefix
-         if not os.path.exists(dirname):
-             # Try creating it, but only signal error if creation fails or not writable
-             try:
-                 os.makedirs(dirname, exist_ok=True)
-             except OSError as e:
-                  return False, f"Could not create output directory '{dirname}': {e}"
-         if not os.access(dirname, os.W_OK):
-             return False, f"Output directory '{dirname}' is not writable (check permissions)." 
-     elif not os.access(os.getcwd(), os.W_OK):
-          # If prefix is just a filename, check current dir writability
-          return False, f"Current directory is not writable (check permissions): {os.getcwd()}"
-     return True, prefix # Return prefix on success
+def _validate_output_dir(dir_path):
+     if not dir_path:
+          return False, "Output directory path cannot be empty."
+     # Basic check for potentially invalid characters - less strict for dirs than files
+     # but still good to catch common issues if not using os.makedirs robustness
+     # dirname = os.path.basename(dir_path) # No, use the whole path for check
+     # invalid_chars = ':*?"<>|'
+     # if any(c in invalid_chars for c in dir_path):
+     #     return False, f"Output directory path '{dir_path}' contains potentially invalid characters: {invalid_chars}"
+
+     # Check if path exists
+     if not os.path.exists(dir_path):
+         # Try creating it
+         log.info(f"Output directory does not exist. Attempting to create: {dir_path}")
+         try:
+             os.makedirs(dir_path, exist_ok=True)
+             # Check writability *after* creation attempt
+             if not os.access(dir_path, os.W_OK):
+                 return False, f"Created output directory is not writable: {dir_path}"
+         except OSError as e:
+             return False, f"Could not create output directory '{dir_path}': {e}"
+         except Exception as e:
+             return False, f"An unexpected error occurred creating directory '{dir_path}': {e}"
+     # If path exists, check if it's actually a dir and writable
+     elif not os.path.isdir(dir_path):
+         return False, f"Output path exists but is not a directory: {dir_path}"
+     elif not os.access(dir_path, os.W_OK):
+         return False, f"Output directory is not writable: {dir_path}"
+
+     return True, dir_path # Return dir_path on success
 
 def _validate_path(path_str):
      if not path_str:
@@ -166,12 +176,18 @@ def run_interactive_mode():
             "📄 Enter path to the input JSON file",
             validation_func=_validate_input_file
         )
-        args.output_prefix = _prompt_with_validation(
-            "📂 Enter output file prefix (e.g., output/chunk)",
-            validation_func=_validate_output_prefix
+        args.output_dir = _prompt_with_validation(
+            "📂 Enter output directory path (e.g., output/, . for current)",
+            default=".",
+            validation_func=_validate_output_dir # Use new validation function
+        )
+        args.base_name = _prompt_with_validation(
+            "🏷️ Enter base name for output files (e.g., chunk, data_part)",
+            default="chunk",
+            required=True # Require a base name
         )
         args.split_by = _prompt_with_validation(
-            "✂️ Split by which criterion?",
+            "✂️ Split by which criterion? (count / size / key)",
             choices=['count', 'size', 'key']
         )
 
@@ -217,7 +233,7 @@ def run_interactive_mode():
                  )
 
             # Set default format based on split type *before* prompting
-            default_ff = "{prefix}_key_{index}{part}.{ext}" if args.split_by == 'key' else "{prefix}_{type}_{index:04d}{part}.{ext}"
+            default_ff = "{base_name}_key_{index}{part}.{ext}" if args.split_by == 'key' else "{base_name}_{type}_{index:04d}{part}.{ext}"
             ff_prompt = "🏷️ Output filename format?"
             args.filename_format = _prompt_with_validation(ff_prompt, default=default_ff, required=False)
 
@@ -234,10 +250,37 @@ def run_interactive_mode():
             if args.report_interval is None: args.report_interval = 0 # Treat None as 0 (disabled)
         else:
             # Ensure filename_format gets a default even if optionals skipped
-            args.filename_format = "{prefix}_key_{index}{part}.{ext}" if args.split_by == 'key' else "{prefix}_{type}_{index:04d}{part}.{ext}"
+            args.filename_format = "{base_name}_key_{index}{part}.{ext}" if args.split_by == 'key' else "{base_name}_{type}_{index:04d}{part}.{ext}"
 
-        log.info("\n✅ Configuration complete. Proceeding with splitting...")
-        return args
+        # --- Configuration Summary and Confirmation ---
+        print("\n" + "="*40)
+        log.info("⚙️ Summary of Configuration:")
+        print("-"*40)
+        print(f"  Input File:        {args.input_file}")
+        print(f"  Output Directory:  {os.path.abspath(args.output_dir)}") # Show absolute path
+        print(f"  Base Filename:     {args.base_name}")
+        print(f"  Split Strategy:    {args.split_by}")
+        print(f"  Split Value:       {args.value}")
+        print(f"  JSON Path:         {args.path}")
+        print(f"  Output Format:     {args.output_format}{' (Forced by key split)' if args.split_by == 'key' and args.output_format != 'jsonl' else ''}")
+        print(f"  Max Records/Part:  {args.max_records if args.max_records is not None else 'None'}")
+        print(f"  Max Size/Part:     {args.max_size if args.max_size is not None else 'None'}")
+        if args.split_by == 'key':
+            print(f"  On Missing Key:    {args.on_missing_key}")
+            print(f"  On Invalid Item:   {args.on_invalid_item}")
+        print(f"  Filename Format:   {args.filename_format}")
+        print(f"  Report Interval:   {args.report_interval if args.report_interval > 0 else 'Disabled'}")
+        print(f"  Verbose Logging:   {args.verbose}")
+        print("="*40)
+
+        confirm = _prompt_with_validation("🚀 Proceed with these settings?", choices=['y', 'n'], default='y')
+
+        if confirm.lower() == 'y':
+            log.info("\n✅ Configuration confirmed. Proceeding with splitting...")
+            return args
+        else:
+            log.info("Operation cancelled by user.")
+            sys.exit(0)
 
     except (KeyboardInterrupt, EOFError):
         # Already handled in _prompt_with_validation, but catch here too
@@ -257,7 +300,7 @@ def execute_split(args):
         log.setLevel(logging.INFO)
 
     # --- Input Validation (File Existence/Readability) ---
-    # Moved prefix dir validation to interactive/argparse phase
+    # Directory validation/creation is now handled by _validate_output_dir
     if not os.path.isfile(args.input_file):
         log.error(f"Input file not found: {args.input_file}")
         return False
@@ -268,7 +311,8 @@ def execute_split(args):
     # --- Prepare Splitter Arguments --- # Note: Some validation now in splitter __init__
     splitter_kwargs = {
         'input_file': args.input_file,
-        'output_prefix': args.output_prefix,
+        'output_dir': args.output_dir,
+        'base_name': args.base_name,
         'path': args.path,
         'output_format': args.output_format,
         'max_records': args.max_records,
@@ -356,8 +400,8 @@ def main():
     # --- Positional Arguments (Required for CLI) --- #
     parser.add_argument("input_file", nargs='?', default=None, # Optional for interactive mode
                         help="Path to the input JSON file.")
-    parser.add_argument("output_prefix", nargs='?', default=None,
-                        help="Prefix for the output files (e.g., 'output/chunk').")
+    # parser.add_argument("output_prefix", nargs='?', default=None,
+    #                     help="Prefix for the output files (e.g., 'output/chunk').") # Removed positional
 
     # --- Core Splitting Options (Required for CLI) --- #
     parser.add_argument("--split-by", choices=['count', 'size', 'key'],
@@ -372,13 +416,19 @@ def main():
     # --- Common Optional Arguments --- #
     parser.add_argument("--output-format", choices=['json', 'jsonl'], default='json',
                         help="Output format. Default: json. (Note: 'key' split forces 'jsonl')")
+    # Add --output-dir and --base-name
+    parser.add_argument("--output-dir", type=str, default=".",
+                        help="Directory to save output files (default: current directory).")
+    parser.add_argument("--base-name", type=str, default="chunk",
+                        help="Base name for output files (default: chunk).")
     parser.add_argument("--max-records", type=int, default=None,
                          help="Secondary constraint: Max records per output file part.")
     parser.add_argument("--max-size", type=str, default=None,
                          help="Secondary constraint: Max approx size per output file part (e.g., '50MB').")
     parser.add_argument("--filename-format", type=str, default=None, # Default handled based on split_by later
                          help="Format string for output filenames. Placeholders:\n"
-                              "  {prefix}, {type} ('chunk' or 'key'),\n"
+                              "  {base_name} (provided base name, default 'chunk'),\n"
+                              "  {type} ('chunk' or 'key'),\n"
                               "  {index} (number or key value), {part} (_part_XXXX),\n"
                               "  {ext} (json/jsonl). Default varies by split type.")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -386,6 +436,9 @@ def main():
     # Add report interval argument
     parser.add_argument("--report-interval", type=int, default=10000,
                          help="How often to report progress (number of items). Set to 0 to disable. Default: 10000.")
+    # Add config file argument
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to a YAML configuration file.")
 
     # --- Key Splitting Options --- #
     key_group = parser.add_argument_group('Key Splitting Options')
@@ -394,12 +447,47 @@ def main():
     key_group.add_argument("--on-invalid-item", choices=['warn', 'skip', 'error'], default='warn',
                             help="Action for items at path not being objects (default: warn and skip).")
 
-    # --- Parse Arguments --- #
-    args = parser.parse_args()
+    # --- Load Config File (if provided) and Set Defaults --- #
+    # Parse only the --config argument first to load defaults
+    config_parser = argparse.ArgumentParser(add_help=False) # Suppress help here
+    config_parser.add_argument("--config", type=str, default=None)
+    config_args, remaining_argv = config_parser.parse_known_args()
+
+    config_values = {}
+    if config_args.config:
+        log.info(f"Loading configuration from: {config_args.config}")
+        try:
+            with open(config_args.config, 'r') as f:
+                loaded_config = yaml.safe_load(f)
+                if loaded_config:
+                    config_values = loaded_config
+                else:
+                    log.warning(f"Configuration file '{config_args.config}' is empty.")
+        except FileNotFoundError:
+            log.error(f"Configuration file not found: {config_args.config}")
+            sys.exit(1) # Exit if specified config not found
+        except yaml.YAMLError as e:
+            log.error(f"Error parsing configuration file '{config_args.config}': {e}")
+            sys.exit(1) # Exit if config is invalid
+        except Exception as e:
+            log.error(f"An unexpected error occurred reading configuration file '{config_args.config}': {e}")
+            sys.exit(1)
+
+    # Set the loaded config values as defaults for the main parser
+    # Any explicit CLI args parsed next will override these
+    parser.set_defaults(**config_values)
+
+    # --- Parse Arguments (using potentially updated defaults) --- #
+    # args = parser.parse_args()
+    # Parse the *remaining* arguments, now using the full parser
+    # This ensures CLI args override config defaults
+    args = parser.parse_args(remaining_argv)
 
     # --- Decide Mode: Interactive or CLI --- #
     # Run interactive mode only if specifically requested (no args) AND stdin is a TTY
-    run_interactive = len(sys.argv) == 1 and sys.stdin.isatty()
+    # AND no config file was provided
+    # run_interactive = len(sys.argv) == 1 and sys.stdin.isatty()
+    run_interactive = (len(sys.argv) == 1 and not config_args.config and sys.stdin.isatty())
 
     if run_interactive:
         # Fully interactive mode
@@ -412,13 +500,13 @@ def main():
 
         # Re-check core args presence in case called programmatically without full CLI args
         # but also not in interactive mode (e.g., tests missing args)
-        is_missing_core_cli = not (args.input_file and args.output_prefix and args.split_by and args.value and args.path)
+        is_missing_core_cli = not (args.input_file and args.split_by and args.value and args.path)
         if is_missing_core_cli and not run_interactive:
              # If not interactive and missing core args, it's an error
              # Construct the message manually as argparse might not have been triggered with full checks
              missing_required = []
              if not args.input_file: missing_required.append('input_file')
-             if not args.output_prefix: missing_required.append('output_prefix')
+             # if not args.output_prefix: missing_required.append('output_prefix') # Removed
              if not args.split_by: missing_required.append('--split-by')
              if not args.value: missing_required.append('--value')
              if not args.path: missing_required.append('--path')
@@ -440,7 +528,8 @@ def main():
 
         # Set default filename format if not provided by user
         if args.filename_format is None:
-             args.filename_format = "{prefix}_key_{index}{part}.{ext}" if args.split_by == 'key' else "{prefix}_{type}_{index:04d}{part}.{ext}"
+             # Use {base_name} instead of {prefix}
+             args.filename_format = "{base_name}_key_{index}{part}.{ext}" if args.split_by == 'key' else "{base_name}_{type}_{index:04d}{part}.{ext}"
 
         final_args = args
 
