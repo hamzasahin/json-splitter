@@ -52,7 +52,7 @@ You have two ways to run the splitter:
 If you're unsure about the options, just run the script without any arguments. It will guide you step-by-step:
 
 ```bash
-python src/json_splitter.py
+python src/main.py
 ```
 
 ### 2. Command-Line Interface (CLI)
@@ -60,7 +60,7 @@ python src/json_splitter.py
 For scripting or direct control, use the command line:
 
 ```bash
-python src/json_splitter.py <input_file> <output_prefix> --split-by <strategy> --value <split_value> --path <json_path> [options]
+python src/main.py <input_file> <output_prefix> --split-by <strategy> --value <split_value> --path <json_path> [options]
 ```
 
 **Core Arguments:**
@@ -98,7 +98,7 @@ python src/json_splitter.py <input_file> <output_prefix> --split-by <strategy> -
 Split `large_log.json` into files of roughly 100MB each. The data to split is the array found under the `events` key.
 
 ```bash
-python src/json_splitter.py large_log.json output/log_part --split-by size --value 100MB --path events
+python src/main.py large_log.json output/log_part --split-by size --value 100MB --path events
 ```
 *Creates files like `output/log_part_chunk_0000.json`, `output/log_part_chunk_0001.json`, ...*
 
@@ -107,7 +107,7 @@ python src/json_splitter.py large_log.json output/log_part --split-by size --val
 Split `user_data.json` into files containing 50,000 users each, outputting as JSON Lines. The user objects are in an array under `results.users`.
 
 ```bash
-python src/json_splitter.py user_data.json output/users --split-by count --value 50000 --path results.users.item --output-format jsonl
+python src/main.py user_data.json output/users --split-by count --value 50000 --path results.users.item --output-format jsonl
 ```
 *Creates files like `output/users_chunk_0000.jsonl`, `output/users_chunk_0001.jsonl`, ...*
 
@@ -116,7 +116,7 @@ python src/json_splitter.py user_data.json output/users --split-by count --value
 Group items from `orders.json` based on their `customer_id`. The items are in the root array (`item`).
 
 ```bash
-python src/json_splitter.py orders.json customer_orders/order --split-by key --value customer_id --path item
+python src/main.py orders.json customer_orders/order --split-by key --value customer_id --path item
 ```
 *Creates files like `customer_orders/order_key_cust101.jsonl`, `customer_orders/order_key_cust456.jsonl`, ...*
 
