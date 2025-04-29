@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Hamza Sahin
+# Licensed under the MIT License. See LICENSE file for details.
+
 import argparse
 import json
 import ijson
