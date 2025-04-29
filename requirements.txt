@@ -3,3 +3,4 @@ pytest # For running tests
 click
 rich
 cachetools 
+PyYAML # Added for config file support 

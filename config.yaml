@@ -1,0 +1,50 @@
+input_file: /Users/user/json-splitter/tests/data/json-40mb.json
+split_by: size
+value: 15MB
+path: item # Path to the array of user objects
+
+# --- Common Optional Settings --- #
+
+# Directory to save output files
+# Default: . (current directory)
+output_dir: ./output/
+
+# Base name for output files
+# Default: chunk
+base_name: user_chunk
+
+# Output format: json or jsonl
+# Default: json (unless split_by is 'key', then jsonl is forced)
+output_format: json
+
+# Secondary limit: Max records per output file part
+# Default: null (None)
+max_records: null
+
+# Secondary limit: Max approx size per output file part (e.g., '50MB')
+# Default: null (None)
+max_size: null
+
+# Format string for output filenames.
+# Placeholders: {base_name}, {type}, {index}, {part}, {ext}
+# Default for count/size: "{base_name}_{type}_{index:04d}{part}.{ext}"
+# Default for key: "{base_name}_key_{index}{part}.{ext}"
+# filename_format: "{base_name}_part_{index}.{ext}"
+
+# Enable verbose debug logging
+# Default: false
+verbose: false
+
+# How often to report progress (number of items). Set to 0 to disable.
+# Default: 10000
+report_interval: 5000
+
+
+# --- Key Splitting Options --- #
+# (Only relevant if split_by is 'key')
+
+# Action for items missing the key: group, skip, error
+# Default: group
+on_missing_key: group
+
+on_invalid_item: warn 

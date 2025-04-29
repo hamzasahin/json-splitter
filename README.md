@@ -12,9 +12,10 @@ It takes a large JSON file (even multiple gigabytes!) and splits the data inside
 
 ## ✅ Why use it?
 
--   **Handles Huge Files:** Designed for files too large to fit into memory, using efficient streaming.
+-   **Handles Huge Files:** Designed for files too large to fit into memory, using efficient streaming via `ijson`.
 -   **Flexible Splitting:** Choose the method that best suits your needs.
--   **Works with Nested Data:** Can target data deep within the JSON structure using a simple path.
+-   **Works with Nested Data:** Can target data deep within the JSON structure using a simple dot-notation path (e.g., `data.records.item`).
+-   **Memory Efficient Key Splitting:** Uses an LRU (Least Recently Used) cache to limit the number of simultaneously open files when splitting by key, preventing issues with resource limits.
 -   **Easy to Use:** Run via command-line or a helpful interactive mode.
 
 ## 🚀 Getting Started
@@ -32,35 +33,47 @@ It takes a large JSON file (even multiple gigabytes!) and splits the data inside
     ```
 
 2.  **Set up a virtual environment (Recommended):**
-    *This keeps dependencies isolated.* 
+    *This keeps dependencies isolated.*
     ```bash
     python -m venv venv
-    source venv/bin/activate  # On Windows use: venv\Scripts\activate
+    source venv/bin/activate  # On Windows use: venv\\Scripts\\activate
     ```
 
 3.  **Install dependencies:**
+    *(Ensure `cachetools` is included if it wasn't already)*
     ```bash
     pip install -r requirements.txt
     ```
 
 ## 💻 How to Use
 
-You have two ways to run the splitter:
+You have three ways to run the splitter, with the configuration file method being recommended for clarity and reproducibility:
 
-### 1. Interactive Mode (Easy Start)
+### 1. Configuration File (Recommended)
 
-If you're unsure about the options, just run the script without any arguments. It will guide you step-by-step:
+You can define all splitting parameters in a YAML configuration file and load it using the `--config` option. This is useful for complex or frequently used configurations.
 
+**Example:**
 ```bash
-python src/json_splitter.py
+python -m src.main --config my_split_config.yaml
 ```
+
+*(If you need to temporarily override a setting from the config file, you can still pass specific command-line arguments.)*
+
+**Argument Precedence:**
+
+1.  **Command-Line Arguments:** Have the highest priority and will override any settings from the config file.
+2.  **Configuration File:** Values specified in the loaded YAML file override the built-in defaults.
+3.  **Built-in Defaults:** Have the lowest priority (e.g., `output_dir="."`, `base_name="chunk"`).
+
+See the `config.example.yaml` file in the repository for a template and examples of all available options.
 
 ### 2. Command-Line Interface (CLI)
 
-For scripting or direct control, use the command line:
+For scripting or direct control without a config file, use the command line from the project root directory:
 
 ```bash
-python src/json_splitter.py <input_file> <output_prefix> --split-by <strategy> --value <split_value> --path <json_path> [options]
+python -m src.main <input_file> --split-by <strategy> --value <split_value> --path <json_path> [options]
 ```
 
 **Core Arguments:**
@@ -68,20 +81,23 @@ python src/json_splitter.py <input_file> <output_prefix> --split-by <strategy> -
 | Argument        | Description                                                                 |
 | :-------------- | :-------------------------------------------------------------------------- |
 | `input_file`    | Path to your large input JSON file.                                         |
-| `output_prefix` | Path and prefix for the output files (e.g., `output/chunk`). Directory created if needed. |
 | `--split-by`    | How to split: `count`, `size`, or `key`.                                    |
 | `--value`       | The value for the split strategy (e.g., `10000`, `50MB`, `product_id`).      |
-| `--path`        | Path to the array you want to split (e.g., `item`, `data.records.item`).    |
+| `--path`        | Dot-notation path to the array to split (e.g., `item`, `data.records.item`). Use `item` or leave empty for root array. |
 
 **Common Options:**
 
-| Option              | Description                                                                     |
-| :------------------ | :------------------------------------------------------------------------------ |
-| `--output-format`   | `json` (default) or `jsonl` (JSON Lines). *(Note: `key` split forces `jsonl`)* |
-| `--max-records <N>` | *Secondary limit:* Max number of items per output file part.                    |
-| `--max-size <size>` | *Secondary limit:* Max approximate size per output file part (e.g., `100MB`).   |
-| `--filename-format` | Customize output file names (see *Filename Formatting* below).                  |
-| `-v`, `--verbose`   | Show detailed debug messages.                                                   |
+| Option                | Description                                                                     |
+| :-------------------- | :------------------------------------------------------------------------------ |
+| `--config <file>`     | Path to a YAML configuration file (overrides defaults before other CLI args).   |
+| `--output-dir <dir>`  | Directory to save output files (default: current directory `.`).                  |
+| `--base-name <name>`  | Base name for output files (default: `chunk`).                                  |
+| `--output-format`     | `json` (default, pretty-printed) or `jsonl` (JSON Lines). *(Note: `key` split forces `jsonl`)* |
+| `--max-records <N>`   | *Secondary limit:* Max number of items per output file part.                    |
+| `--max-size <size>`   | *Secondary limit:* Max approximate size per output file part (e.g., `100MB`).   |
+| `--filename-format`   | Customize output file names (see *Filename Formatting* below).                  |
+| `--report-interval <N>`| Report progress every N items (default: 10000). Set to 0 to disable.           |
+| `-v`, `--verbose`     | Show detailed debug messages.                                                   |
 
 **Key Splitting Options:**
 *(Only relevant when using `--split-by key`)*
@@ -91,52 +107,67 @@ python src/json_splitter.py <input_file> <output_prefix> --split-by <strategy> -
 | `--on-missing-key`  | What to do if an item lacks the key: `group` (default, into `__missing_key__` file), `skip`, or `error` (stop script).      |
 | `--on-invalid-item` | What to do if an item at `--path` isn't an object: `warn` (default, prints warning and skips), `skip`, or `error` (stop script). |
 
-### Examples
+### 3. Interactive Mode (Easy Start)
+
+If you're unsure about the options or running a one-off split, just run the script without any arguments from the project root directory. It will guide you step-by-step:
+
+```bash
+python -m src.main
+```
+
+## Examples
+
+*(These examples use the CLI method for conciseness, but the same options can be put into a config file)*
 
 **Example 1: Split by Size**
 
-Split `large_log.json` into files of roughly 100MB each. The data to split is the array found under the `events` key.
+Split `large_log.json` into files of roughly 100MB each, saving them in the `log_parts/` directory. The data to split is the array found under the `events` key.
 
 ```bash
-python src/json_splitter.py large_log.json output/log_part --split-by size --value 100MB --path events
+python -m src.main large_log.json --output-dir log_parts/ --base-name log --split-by size --value 100MB --path events.item
 ```
-*Creates files like `output/log_part_chunk_0000.json`, `output/log_part_chunk_0001.json`, ...*
+*Creates files like `log_parts/log_chunk_0000.json`, `log_parts/log_chunk_0001.json`, ...*
+*(Note: Adjusted path to `events.item` assuming `events` is an object containing an array named `item`. Adjust if `events` itself is the array)*
 
 **Example 2: Split by Count (JSON Lines)**
 
-Split `user_data.json` into files containing 50,000 users each, outputting as JSON Lines. The user objects are in an array under `results.users`.
+Split `user_data.json` into files containing 50,000 users each, outputting as JSON Lines into the `user_outputs/` directory.
 
 ```bash
-python src/json_splitter.py user_data.json output/users --split-by count --value 50000 --path results.users.item --output-format jsonl
+python -m src.main user_data.json --output-dir user_outputs/ --base-name user --split-by count --value 50000 --path results.users.item --output-format jsonl
 ```
-*Creates files like `output/users_chunk_0000.jsonl`, `output/users_chunk_0001.jsonl`, ...*
+*Creates files like `user_outputs/user_chunk_0000.jsonl`, `user_outputs/user_chunk_0001.jsonl`, ...*
 
 **Example 3: Split by Key**
 
-Group items from `orders.json` based on their `customer_id`. The items are in the root array (`item`).
+Group items from `orders.json` based on their `customer_id`, saving files into `customer_orders/`. The items are in the root array. Output will be JSON Lines format.
 
 ```bash
-python src/json_splitter.py orders.json customer_orders/order --split-by key --value customer_id --path item
+# Use 'item' or empty string for root array path
+python -m src.main orders.json --output-dir customer_orders/ --base-name order --split-by key --value customer_id --path item
 ```
-*Creates files like `customer_orders/order_key_cust101.jsonl`, `customer_orders/order_key_cust456.jsonl`, ...*
+*Creates files like `customer_orders/order_key_cust101.jsonl`, `customer_orders/order_key_cust456.jsonl`, ... (Note the `.jsonl` extension)*
 
 ### Filename Formatting
 
-You can control the output filenames using `--filename-format`. Available placeholders:
+You can control the output filenames using `--filename-format` (either via CLI or in the config file). Available placeholders:
 
--   `{prefix}`: The `<output_prefix>` you provided.
+-   `{base_name}`: The `--base-name` you provided (default: `chunk`).
 -   `{type}`: How the split was done (`chunk` for count/size, `key` for key split).
 -   `{index}`: The chunk number (e.g., `0000`, `0001`) or the sanitized key value (e.g., `user123`).
 -   `{part}`: An optional part suffix (e.g., `_part_0001`) added if secondary limits (`max-records`/`max-size`) cause a split *within* a primary chunk/key.
 -   `{ext}`: The file extension (`json` or `jsonl`).
 
-**Default Format:** `{prefix}_{type}_{index:04d}{part}.{ext}` (for count/size) or `{prefix}_key_{index}{part}.{ext}` (for key).
+**Default Format:** `{base_name}_{type}_{index:04d}{part}.{ext}` (for count/size) or `{base_name}_key_{index}{part}.{ext}` (for key).
 
 ## 💡 Good to Know
 
 -   **Input Must Be Valid JSON:** The script expects a syntactically correct JSON file. If you have issues, validate your input file first.
--   **Memory Use with Many Keys:** Splitting by `key` on data with millions of unique keys *can* still use significant memory (to track the keys and file handles). The tool uses caching to limit open files, but be mindful if your keys have extremely high cardinality.
--   **Size Estimation:** Splitting by `size` is an *approximation*. Actual file sizes may vary slightly due to JSON formatting overhead.
+-   **Memory Use with Many Keys:** Splitting by `key` on data with millions of unique keys uses an LRU cache to manage open file handles, limited by a fixed size (currently 1000, see `MAX_OPEN_FILES_KEY_SPLIT` in `splitters.py`). This prevents hitting OS limits but means files for less frequent keys might be closed and reopened, impacting performance slightly compared to keeping all files open. If you encounter memory issues with extreme key cardinality, this limit might need adjustment in the code.
+-   **Key Split Output Format:** Splitting by `key` *always* produces output files in JSON Lines (`.jsonl`) format, regardless of the `--output-format` setting. This is more efficient for appending items to many different files.
+-   **Size Estimation:** Splitting by `size` is an *approximation*. Actual file sizes may vary slightly due to JSON formatting overhead and how items are grouped.
+-   **JSON Path:** The `--path` argument uses `ijson`'s dot notation (e.g., `data.records.item`). If your target array is at the root of the JSON, use `item` or leave the path empty (`--path ""`).
+-   **Pretty JSON Output:** When using the default `--output-format json`, the output JSON files will be pretty-printed with indentation for better readability.
 
 ## 🤝 Contributing
 
