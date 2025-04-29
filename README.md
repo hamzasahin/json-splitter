@@ -47,19 +47,30 @@ It takes a large JSON file (even multiple gigabytes!) and splits the data inside
 
 ## 💻 How to Use
 
-You have three ways to run the splitter:
+You have three ways to run the splitter, with the configuration file method being recommended for clarity and reproducibility:
 
-### 1. Interactive Mode (Easy Start)
+### 1. Configuration File (Recommended)
 
-If you're unsure about the options, just run the script without any arguments from the project root directory:
+You can define all splitting parameters in a YAML configuration file and load it using the `--config` option. This is useful for complex or frequently used configurations.
 
+**Example:**
 ```bash
-python -m src.main
+python -m src.main --config my_split_config.yaml
 ```
+
+*(If you need to temporarily override a setting from the config file, you can still pass specific command-line arguments.)*
+
+**Argument Precedence:**
+
+1.  **Command-Line Arguments:** Have the highest priority and will override any settings from the config file.
+2.  **Configuration File:** Values specified in the loaded YAML file override the built-in defaults.
+3.  **Built-in Defaults:** Have the lowest priority (e.g., `output_dir="."`, `base_name="chunk"`).
+
+See the `config.example.yaml` file in the repository for a template and examples of all available options.
 
 ### 2. Command-Line Interface (CLI)
 
-For scripting or direct control, use the command line from the project root directory:
+For scripting or direct control without a config file, use the command line from the project root directory:
 
 ```bash
 python -m src.main <input_file> --split-by <strategy> --value <split_value> --path <json_path> [options]
@@ -78,7 +89,7 @@ python -m src.main <input_file> --split-by <strategy> --value <split_value> --pa
 
 | Option                | Description                                                                     |
 | :-------------------- | :------------------------------------------------------------------------------ |
-| `--config <file>`     | Path to a YAML configuration file (see *Configuration File* below).             |
+| `--config <file>`     | Path to a YAML configuration file (overrides defaults before other CLI args).   |
 | `--output-dir <dir>`  | Directory to save output files (default: current directory `.`).                  |
 | `--base-name <name>`  | Base name for output files (default: `chunk`).                                  |
 | `--output-format`     | `json` (default, pretty-printed) or `jsonl` (JSON Lines). *(Note: `key` split forces `jsonl`)* |
@@ -96,7 +107,17 @@ python -m src.main <input_file> --split-by <strategy> --value <split_value> --pa
 | `--on-missing-key`  | What to do if an item lacks the key: `group` (default, into `__missing_key__` file), `skip`, or `error` (stop script).      |
 | `--on-invalid-item` | What to do if an item at `--path` isn't an object: `warn` (default, prints warning and skips), `skip`, or `error` (stop script). |
 
-### Examples
+### 3. Interactive Mode (Easy Start)
+
+If you're unsure about the options or running a one-off split, just run the script without any arguments from the project root directory. It will guide you step-by-step:
+
+```bash
+python -m src.main
+```
+
+## Examples
+
+*(These examples use the CLI method for conciseness, but the same options can be put into a config file)*
 
 **Example 1: Split by Size**
 
@@ -127,25 +148,9 @@ python -m src.main orders.json --output-dir customer_orders/ --base-name order -
 ```
 *Creates files like `customer_orders/order_key_cust101.jsonl`, `customer_orders/order_key_cust456.jsonl`, ... (Note the `.jsonl` extension)*
 
-### 3. Configuration File
-
-You can define all splitting parameters in a YAML configuration file and load it using the `--config` option. This is useful for complex or frequently used configurations.
-
-```bash
-python -m src.main --config my_split_config.yaml
-```
-
-**Argument Precedence:**
-
-1.  **Command-Line Arguments:** Have the highest priority and will override any settings from the config file.
-2.  **Configuration File:** Values specified in the loaded YAML file override the built-in defaults.
-3.  **Built-in Defaults:** Have the lowest priority (e.g., `output_dir="."`, `base_name="chunk"`).
-
-See the `config.example.yaml` file in the repository for a template and examples of all available options.
-
 ### Filename Formatting
 
-You can control the output filenames using `--filename-format`. Available placeholders:
+You can control the output filenames using `--filename-format` (either via CLI or in the config file). Available placeholders:
 
 -   `{base_name}`: The `--base-name` you provided (default: `chunk`).
 -   `{type}`: How the split was done (`chunk` for count/size, `key` for key split).
